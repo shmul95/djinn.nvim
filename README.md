@@ -1,6 +1,6 @@
 # vim-module
 
-An AI function-generation plugin for Neovim: press `<super+f>`, type a request ("write me a fibonacci function"), and generated code streams into the buffer starting at the cursor line. Fire-and-forget granularity — function by function, no chat — packaged as a Nix flake consumed by cabanashmul.
+An AI function-generation plugin for Neovim: press `<D-f>`, type a request ("write me a fibonacci function"), and generated code streams into the buffer starting at the cursor line. Fire-and-forget granularity — function by function, no chat — packaged as a Nix flake consumed by cabanashmul.
 
 ## Installation
 
@@ -38,7 +38,7 @@ All options live under `programs.vim-module.*` (home-manager):
 |--------|------|---------|-------------|
 | `enable` | bool | `false` | Enable the plugin |
 | `model` | str | `claude-haiku-4-5` | Anthropic model id used for generation |
-| `keymap` | str | `<super+f>` | Main trigger keymap (normal + insert) |
+| `keymap` | str | `<D-f>` | Main trigger keymap (normal + insert) |
 | `fallback_keymap` | str | `<leader>af` | Terminal-safe fallback chord (Super silently fails in many terminals) |
 | `api_key_env` | str | `ANTHROPIC_API_KEY` | NAME of the environment variable read for the API key |
 | `curl_bin` | str | nixpkgs `curl` binary path (`lib.getExe pkgs.curl`) | Absolute path to the curl binary used for HTTPS |

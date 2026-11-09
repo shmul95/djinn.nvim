@@ -5,7 +5,7 @@ local M = {}
 
 M.defaults = {
   model           = "claude-haiku-4-5",
-  keymap          = "<super+f>",
+  keymap          = "<D-f>",
   fallback_keymap = "<leader>af",
   api_key_env     = "ANTHROPIC_API_KEY",
   curl_bin        = nil,  -- nil => resolve at request time via vim.fn.exepath("curl") (Phase 3); Nix always supplies an absolute pkgs.curl path

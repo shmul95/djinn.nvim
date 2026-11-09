@@ -23,7 +23,7 @@ in {
   options.programs.vim-module = {
     enable = mkEnableOption "vim-module AI function generation" // { default = false; };
     model = mkOption { type = types.str; default = "claude-haiku-4-5"; description = "Anthropic model id"; };
-    keymap = mkOption { type = types.str; default = "<super+f>"; description = "Primary trigger keymap (normal + insert)"; };
+    keymap = mkOption { type = types.str; default = "<D-f>"; description = "Primary trigger keymap (normal + insert)"; };
     fallback_keymap = mkOption { type = types.str; default = "<leader>af"; description = "Terminal-safe fallback chord"; };
     api_key_env = mkOption { type = types.str; default = "ANTHROPIC_API_KEY"; description = "NAME of the env var holding the API key — never a key value"; };
     curl_bin = mkOption { type = types.str; default = lib.getExe pkgs.curl; description = "Absolute path to curl"; };
