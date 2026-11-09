@@ -161,4 +161,177 @@ function M.new_fence_stripper()
   return stripper
 end
 
+function M.parse_status(dump_path)
+  local f = io.open(dump_path, "r")
+  if not f then return nil end
+  local first_line = f:read("*l")
+  f:close()
+  if not first_line then return nil end
+  local status = first_line:match("HTTP/%d[%d%.]* (%d+)")
+  return tonumber(status)
+end
+
+function M.parse_retry_after(dump_path)
+  local f = io.open(dump_path, "r")
+  if not f then return nil end
+  local content = f:read("*a")
+  f:close()
+  if not content then return nil end
+  return content:match("[Rr]etry%-[Aa]fter:%s*(%d+)")
+end
+
+function M.parse_error_body(raw_stdout)
+  local ok, decoded = pcall(vim.json.decode, raw_stdout)
+  if ok and type(decoded) == "table" and decoded.error and decoded.error.message then
+    return decoded.error.message
+  end
+  return nil
+end
+
+function M.generate(opts)
+  -- Pre-flight: key from env at request time
+  local api_key = vim.env[opts.config.api_key_env]
+  if not api_key or api_key == "" then
+    return nil, "API key not found in " .. opts.config.api_key_env
+  end
+  -- Pre-flight: resolve curl
+  local curl_bin = opts.config.curl_bin or vim.fn.exepath("curl")
+  if not curl_bin or curl_bin == "" then
+    return nil, "curl binary not found"
+  end
+
+  -- Build request
+  local system_text = M.build_system_prompt(opts.buf)
+  local user_content = M.build_user_content(opts.prompt, opts.buf, opts.row, opts.config)
+  local body = M.build_body({
+    model = opts.config.model,
+    max_tokens = opts.config.budgets.max_output_tokens,
+    system_text = system_text,
+    user_content = user_content,
+  })
+
+  -- Write temp files
+  local header_path = M.write_temp_file(M.build_headers(api_key))
+  local body_path = M.write_temp_file(body)
+  local dump_path = vim.fn.tempname()
+
+  -- Build argv
+  local argv = M.build_curl_args(curl_bin, header_path, body_path, dump_path)
+
+  -- State
+  local state = {
+    raw_stdout = "",
+    stop_reason = nil,
+    stop_details = nil,
+    error_msg = nil,
+    cancelled = false,
+  }
+  local RAW_CAP = 10240
+  local acc = { pending = "" }
+  local stripper = M.new_fence_stripper()
+
+  -- SSE parser (require at call time)
+  local sse = require("vim_module.sse")
+  local parser = sse.new(function(event_name, data_str)
+    if event_name == "ping" then return end
+    local ok, data = pcall(vim.json.decode, data_str)
+    if not ok or type(data) ~= "table" then return end
+    if data.type == "error" or event_name == "error" then
+      state.error_msg = (data.error and data.error.message) or "Unknown API error"
+      return
+    end
+    if data.type == "content_block_delta" and data.delta and data.delta.type == "text_delta" then
+      local text = data.delta.text
+      if text and #text > 0 then
+        local complete = require("vim_module.stream").accumulate(acc, text)
+        local clean = stripper:filter(complete)
+        if #clean > 0 then opts.on_lines(clean) end
+      end
+    elseif data.type == "message_delta" then
+      if data.delta then
+        state.stop_reason = data.delta.stop_reason
+        state.stop_details = data.delta.stop_details
+      end
+      -- data.usage.output_tokens captured for Phase 5 telemetry (no-op for now)
+    end
+    -- message_start, content_block_start, content_block_stop, message_stop: lifecycle no-ops
+  end)
+
+  -- Spawn curl (call vim.system as the global — never cache it in a module-local — so tests can replace it)
+  local function stdout_handler(err, data)
+    if data then
+      state.raw_stdout = (state.raw_stdout .. data)
+      if #state.raw_stdout > RAW_CAP then
+        state.raw_stdout = state.raw_stdout:sub(-RAW_CAP)
+      end
+      sse.feed(parser, data)
+    end
+  end
+  local system_obj = vim.system(argv, {
+    stdout = stdout_handler,
+    on_stdout = stdout_handler,
+    on_exit = function(code, signal)
+      sse.finish(parser)
+      local cleanup = function()
+        M.cleanup_temp_files({ header_path, body_path, dump_path })
+      end
+      if state.cancelled then
+        -- User cancel: flush tail, no error
+        if acc.pending ~= "" then
+          local tail = stripper:filter({ acc.pending })
+          acc.pending = ""
+          if #tail > 0 then opts.on_lines(tail) end
+        end
+        opts.on_complete(nil)
+        cleanup()
+        return
+      end
+      if state.error_msg then
+        opts.on_complete(state.error_msg)
+        cleanup()
+        return
+      end
+      local status = M.parse_status(dump_path)
+      if status and status >= 200 and status < 300 then
+        -- 2xx success: flush tail through fence stripper
+        if acc.pending ~= "" then
+          local tail = stripper:filter({ acc.pending })
+          acc.pending = ""
+          if #tail > 0 then opts.on_lines(tail) end
+        end
+        if state.stop_reason == "max_tokens" then
+          opts.on_complete("Generation truncated (max_tokens reached)")
+        elseif state.stop_reason == "refusal" then
+          -- RESEARCH.md: refusal — surface stop_details if present
+          local expl = state.stop_details and state.stop_details.explanation
+          if expl and expl ~= "" then
+            opts.on_complete("Model refused the request: " .. expl)
+          else
+            opts.on_complete("Model refused the request")
+          end
+        else
+          opts.on_complete(nil)
+        end
+      else
+        -- Non-2xx: error body is plain JSON (NOT SSE)
+        local err_msg = M.parse_error_body(state.raw_stdout)
+          or ("HTTP " .. tostring(status or code))
+        if status == 429 then
+          local retry = M.parse_retry_after(dump_path)
+          if retry then err_msg = err_msg .. " (retry after " .. retry .. "s)" end
+        end
+        opts.on_complete(err_msg)
+      end
+      cleanup()
+    end,
+  })
+
+  return {
+    cancel = function()
+      state.cancelled = true
+      system_obj:kill()
+    end,
+  }
+end
+
 return M
