@@ -7,10 +7,18 @@ let
   cfg = config.programs.vim-module;
   plugin = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
   # SAFE Nix->Lua serialization: JSON payload inside a Lua long-bracket string
+  # whose bracket level is chosen so the closing delimiter can never occur in
+  # the payload (otherwise a value containing e.g. ']==]' terminates the string
+  # early and the remainder executes as Lua at editor startup).
   setupJson = builtins.toJSON {
     model = cfg.model; keymap = cfg.keymap; fallback_keymap = cfg.fallback_keymap;
     api_key_env = cfg.api_key_env; curl_bin = cfg.curl_bin; budgets = cfg.budgets;
   };
+  # least n >= 0 such that ']' + n*'=' + ']' is not a substring of setupJson
+  brLen = let
+    go = n: if lib.hasInfix ("]${lib.concatStringsSep "" (lib.genList (_: "=") n)}]") setupJson then go (n + 1) else n;
+  in go 0;
+  br = lib.concatStringsSep "" (lib.genList (_: "=") brLen);
 in {
   options.programs.vim-module = {
     enable = mkEnableOption "vim-module AI function generation" // { default = false; };
@@ -31,7 +39,7 @@ in {
   config = mkIf cfg.enable (optionalAttrs (options.programs ? shmulvim) {
     programs.shmulvim.extraConfig = mkAfter ''
       vim.opt.runtimepath:prepend("${plugin}")
-      require("vim_module").setup(vim.json.decode([==[${setupJson}]==]))
+      require("vim_module").setup(vim.json.decode([${br}[${setupJson}]${br}]))
     '';
   });
 }
