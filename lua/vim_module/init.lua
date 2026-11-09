@@ -28,11 +28,14 @@ function M.setup(opts)
   local config = require("vim_module.config").merge(strip_nil(opts or {}))
   vim.keymap.set({ "n", "i" }, config.keymap, M.trigger, { desc = "vim-module: generate function" })
   vim.keymap.set({ "n", "i" }, config.fallback_keymap, M.trigger, { desc = "vim-module: generate function (fallback)" })
+  vim.api.nvim_create_user_command("VimModuleCancel", function()
+    require("vim_module.ui").cancel()
+  end, { desc = "vim-module: cancel in-flight generation" })
   M._config = config
 end
 
 function M.trigger()
-  vim.notify("vim-module: generation not implemented yet (Phase 3)", vim.log.levels.INFO)
+  require("vim_module.ui").start(M._config)
 end
 
 return M
