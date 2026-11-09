@@ -15,6 +15,7 @@ local REQUIRED = {
   "region_deleted_midstream_continues",
   "mark_gone_aborts_gracefully",
   "multi_flush_single_undo",
+  "user_edit_keeps_own_undo_block",
   "cursor_never_moves",
   "accumulate_partial_lines",
 }
@@ -204,6 +205,38 @@ case("multi_flush_single_undo", function()
   vim.cmd("undo")
   assert(bufstr(buf) == "a|b|c",
     "multi_flush_single_undo: one u must remove the whole generation, got \"" .. bufstr(buf) .. "\"")
+end)
+
+case("user_edit_keeps_own_undo_block", function()
+  -- WR-01: a USER mid-stream edit (GEN-03 blesses these) must survive the
+  -- undo that removes the generation — undojoin must NOT swallow it.
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "s", "t" })
+  vim.api.nvim_set_current_buf(buf)
+  vim.o.undolevels = vim.o.undolevels
+  -- ^ closes the fixture-setup undo block. REQUIRED: consecutive API changes
+  --   auto-merge into one undo block otherwise (see multi_flush_single_undo).
+  local job = stream.create(buf, 1)
+  stream.enqueue(job, { "a", "b", "c" })
+  settle(job)
+  assert_buf(buf, "s|a|b|c|t", "user_edit_keeps_own_undo_block after gen1")
+  vim.o.undolevels = vim.o.undolevels   -- user keystroke boundary (as user keystrokes would)
+  -- The "user" edits mid-stream: a direct set_lines that advances changedtick.
+  vim.api.nvim_buf_set_lines(buf, 0, 0, false, { "USER" })
+  vim.o.undolevels = vim.o.undolevels   -- end of the user's edit = its own undo block
+  stream.enqueue(job, { "d", "e" })
+  settle(job)
+  assert_buf(buf, "USER|s|a|b|c|d|e|t", "user_edit_keeps_own_undo_block after gen2")
+  vim.cmd("undo")
+  assert_buf(buf, "USER|s|a|b|c|t",
+    "user_edit_keeps_own_undo_block: one u must remove only d,e (user edit survives), got \""
+      .. bufstr(buf) .. "\"")
+  vim.cmd("undo")
+  assert_buf(buf, "s|a|b|c|t",
+    "user_edit_keeps_own_undo_block: second u must remove the user edit, got \"" .. bufstr(buf) .. "\"")
+  vim.cmd("undo")
+  assert_buf(buf, "s|t",
+    "user_edit_keeps_own_undo_block: third u must remove a,b,c, got \"" .. bufstr(buf) .. "\"")
 end)
 
 case("cursor_never_moves", function()

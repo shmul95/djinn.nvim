@@ -48,6 +48,11 @@ function M.create(buf, row, opts)
     virt_text = { { status_text, "Comment" } },
     virt_text_pos = "eol",
   })
+  -- Changedtick of OUR last write (none yet). The undojoin guard compares
+  -- against this: a differing tick means the USER edited in between (GEN-03
+  -- blesses mid-stream user edits) and the append must start its own undo
+  -- block instead of swallowing their change.
+  job._tick = vim.api.nvim_buf_get_changedtick(buf)
   return job
 end
 
@@ -74,16 +79,22 @@ local function flush(job)
     return
   end
   if #lines > 0 then
-    if job.appended then
-      -- undojoin ONLY here, ONLY before a real append, ONLY after the first.
-      -- The first append must start its own undo block; an unconditional
-      -- undojoin before it merges the generation into the preceding change,
-      -- and an undojoin before an empty flush would merge the USER's next
-      -- edit into the generation's undo block.
+    -- undojoin ONLY here, ONLY before a real append, ONLY after the first,
+    -- and ONLY when we were the buffer's last writer (changedtick unchanged
+    -- since OUR previous set_lines). The first append must start its own undo
+    -- block; an unconditional undojoin before it merges the generation into
+    -- the preceding change; an undojoin before an empty flush would merge the
+    -- USER's next edit into the generation's undo block; and an undojoin when
+    -- the tick moved (a USER mid-stream edit) merges THEIR edit into the
+    -- generation's undo block — one `u` then deletes their typing. A differing
+    -- tick starts a new undo block (generation may span two blocks — graceful
+    -- degradation, versus silently eating the user's edit).
+    if job.appended and vim.api.nvim_buf_get_changedtick(job.buf) == job._tick then
       pcall(vim.cmd, "undojoin")
     end
     job.appended = true
     vim.api.nvim_buf_set_lines(job.buf, e[1], e[1], false, lines)
+    job._tick = vim.api.nvim_buf_get_changedtick(job.buf)
   end
   if job._finishing then
     -- Clear the status by re-setting the end mark WITHOUT virt_text at its
