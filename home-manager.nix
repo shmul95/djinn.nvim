@@ -29,8 +29,8 @@ in {
     curl_bin = mkOption { type = types.str; default = lib.getExe pkgs.curl; description = "Absolute path to curl"; };
     budgets = mkOption {
       type = types.submodule { options = {
-        context_tokens = mkOption { type = types.int; default = 4000; description = "Token budget for packed context"; };
-        max_output_tokens = mkOption { type = types.int; default = 1024; description = "Token budget for generated output"; };
+        context_tokens = mkOption { type = types.ints.positive; default = 4000; description = "Token budget for packed context"; };
+        max_output_tokens = mkOption { type = types.ints.positive; default = 1024; description = "Token budget for generated output"; };
       }; };
       default = {};
       description = "Token budgets (no secrets, ints only)";
