@@ -10,6 +10,7 @@ local REQUIRED = {
   "default_event_name",
   "split_event_across_chunks",
   "crlf_frames",
+  "crlf_split_across_chunks",
   "multi_line_data",
   "malformed_frames_skipped",
   "comment_frames_ignored",
@@ -59,6 +60,36 @@ end)
 case("crlf_frames", function()
   local events = run({ "event: foo\r\ndata: bar\r\n\r\n" })
   expect(events, { { "foo", "bar" } }, "crlf_frames")
+end)
+
+case("crlf_split_across_chunks", function()
+  -- CR-01 re-proof: a "\r\n" pair split across feed() boundaries must parse
+  -- IDENTICALLY to the LF equivalent (locked truth: "CRLF frames parse
+  -- identically to LF frames") — no \r residue, no drop, no merge.
+  local lf = run({ "event: foo\ndata: bar\n\n" })
+  expect(lf, { { "foo", "bar" } }, "crlf_split_across_chunks LF reference")
+  -- "...data: x\r" + "\n\n": the CRLF straddles the chunk join at the terminator.
+  local crlf = run({ "event: foo\r\ndata: bar\r", "\n\n" })
+  expect(crlf, { { "foo", "bar" } }, "crlf_split_across_chunks terminator split")
+  assert(#crlf == #lf,
+    "crlf_split_across_chunks: CRLF feed must parse like LF, event count got "
+      .. #crlf .. " vs " .. #lf)
+  for i = 1, #lf do
+    assert(crlf[i][1] == lf[i][1] and crlf[i][2] == lf[i][2],
+      "crlf_split_across_chunks: CRLF feed must parse identically to LF, event " .. i)
+  end
+  -- three-chunk feed: "\r" | "\n" split mid-frame AND at the terminator.
+  crlf = run({ "event: foo\r", "\ndata: bar\r", "\n\n" })
+  expect(crlf, { { "foo", "bar" } }, "crlf_split_across_chunks three-chunk")
+  -- mid-frame split
+  crlf = run({ "event: foo\r", "\ndata: bar\r\n\r\n" })
+  expect(crlf, { { "foo", "bar" } }, "crlf_split_across_chunks mid-frame")
+  -- split terminator: "\r" | "\n" inside the frame terminator
+  crlf = run({ "event: foo\r\ndata: bar\r\n\r", "\n" })
+  expect(crlf, { { "foo", "bar" } }, "crlf_split_across_chunks split terminator")
+  -- split between two events
+  crlf = run({ "event: a\r\ndata: 1\r\n\r", "\nevent: b\r\ndata: 2\r\n\r\n" })
+  expect(crlf, { { "a", "1" }, { "b", "2" } }, "crlf_split_across_chunks between events")
 end)
 
 case("multi_line_data", function()
