@@ -38,8 +38,10 @@ function M.feed(parser, chunk)
   if type(chunk) ~= "string" then
     error("sse.feed: chunk must be a string")
   end
-  chunk = chunk:gsub("\r\n", "\n")
-  parser._buf = parser._buf .. chunk
+  -- Normalize AFTER concatenation, on the accumulated buffer: a "\r" | "\n"
+  -- pair split across two feed() calls is only adjacent once joined, so a
+  -- per-chunk gsub would leave a stray \r and corrupt, drop, or merge frames.
+  parser._buf = ((parser._buf .. chunk):gsub("\r\n", "\n"))
   while true do
     local pos = parser._buf:find("\n\n", 1, true)
     if not pos then
