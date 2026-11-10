@@ -916,12 +916,22 @@ end)
 -- 17. packaging_verify_only (T-05-08): flake.nix/home-manager.nix byte-untouched
 -- (VERIFY-ONLY constraint) and .planning is git-ignored (store exclusion).
 case("packaging_verify_only", function()
-  -- a. VERIFY-ONLY: packaging files unmodified
+  -- a. VERIFY-ONLY: packaging files byte-untouched. WR-04: the old
+  -- `git diff --exit-code <paths>` compared worktree-to-INDEX only — a
+  -- `git add` (or a commit) of an edit kept the gate green while the stated
+  -- contract is byte-untouched (T-05-08). The HEAD diff catches staged +
+  -- unstaged drift...
   -- NOTE: io.popen().close() in Neovim returns true regardless of exit status;
   -- use vim.fn.system + vim.v.shell_error for reliable exit-code checking.
-  local out = vim.fn.system("cd " .. root .. " && git diff --exit-code flake.nix home-manager.nix 2>&1")
+  local out = vim.fn.system("cd " .. root .. " && git diff --exit-code HEAD -- flake.nix home-manager.nix 2>&1")
   assert(vim.v.shell_error == 0,
-    "packaging_verify_only: flake.nix/home-manager.nix modified — VERIFY-ONLY (constraint): " .. out)
+    "packaging_verify_only: flake.nix/home-manager.nix modified (worktree/staged) — VERIFY-ONLY (constraint): " .. out)
+  -- ...and the freeze-point diff catches COMMITTED drift: f48c158 is the
+  -- last commit that legitimately touched either file (Phase 1 — "options
+  -- contract frozen"), so any later commit changing them is drift too.
+  local out1b = vim.fn.system("cd " .. root .. " && git diff --exit-code f48c158835183f1570e43f9661542cbaa2a746cc -- flake.nix home-manager.nix 2>&1")
+  assert(vim.v.shell_error == 0,
+    "packaging_verify_only: flake.nix/home-manager.nix drifted from the Phase 1 freeze point f48c158 (committed drift): " .. out1b)
   -- b. .planning store exclusion
   local out2 = vim.fn.system("cd " .. root .. " && git check-ignore -q .planning 2>&1")
   assert(vim.v.shell_error == 0,
