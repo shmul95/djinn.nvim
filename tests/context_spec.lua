@@ -306,18 +306,32 @@ end)
 case("walk_chunked_yields", function()
   local context = ctx()
   local proj = make_fixture()
-  local schedule_count = 0
+  -- Controlled fake scheduler: queue scheduled fns instead of running them on
+  -- the real event loop. Counting raw vim.schedule calls across vim.wait is
+  -- self-defeating — deferred refresh walks left over from earlier cases fire
+  -- during the wait and inflate the count (caught by the Task 1/2 mutation
+  -- audit). With a private queue, only THIS walk's schedule hops are counted.
+  local queue = {}
   local orig_schedule = vim.schedule
   vim.schedule = function(fn)
-    schedule_count = schedule_count + 1
-    return orig_schedule(fn)
+    queue[#queue + 1] = fn
+    return true
   end
   local got, walk_err
   local ok, err = pcall(function()
     context.walk(proj, function(m) got = m end, 2)
     assert(got == nil, "walk_chunked_yields: async walk must do no inline work (on_done fired inline)")
-    assert(vim.wait(2000, function() return got ~= nil end),
-      "walk_chunked_yields: async walk never completed")
+    assert(#queue == 1,
+      "walk_chunked_yields: walk must queue exactly one entry point, got " .. #queue)
+    local hops = 0
+    while #queue > 0 do
+      local fn = table.remove(queue, 1)
+      hops = hops + 1
+      fn()
+    end
+    assert(got ~= nil, "walk_chunked_yields: on_done never fired while draining scheduled steps")
+    assert(hops >= 2,
+      "walk_chunked_yields: walk must yield periodically via vim.schedule (>=2 hops), got " .. hops)
   end)
   vim.schedule = orig_schedule
   walk_err = err
@@ -328,9 +342,6 @@ case("walk_chunked_yields", function()
     if p == "README.md" then listed = true end
   end
   assert(listed, "walk_chunked_yields: manifest tree must list README.md")
-  assert(schedule_count >= 2,
-    "walk_chunked_yields: walk must yield periodically via vim.schedule (>=2 calls), got " ..
-    schedule_count)
 end)
 
 -- teardown + runner -----------------------------------------------------
