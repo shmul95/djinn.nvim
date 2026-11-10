@@ -439,6 +439,29 @@ case("failure_matrix_500", function()
   end)
   env.restore()
   if not ok then error(err, 0) end
+
+  -- WR-01 re-prove: plain-JSON body with "message": null (decodes to vim.NIL)
+  -- — parse_error_body must return nil so the HTTP fallback surfaces and the
+  -- failure notification is NOT lost to a raise in ui.lua's notify concat.
+  local env2 = ui_case_begin({
+    input = "write fib",
+    api_key = "sk-sweep-FAKEKEY",
+    dump_headers = "HTTP/2 500\n\n",
+  })
+  env2.chunks({ [[{"error": {"message": null}}]] })
+  env2.exit(22)
+  vim.wait(1000, function() return #env2.notify_log > 0 end)
+  vim.wait(50)  -- settle: the exactly-one assertion must not race a second notify
+  local ok2, err2 = pcall(function()
+    assert(#env2.notify_log == 1,
+      "failure_matrix_500 (null message): want exactly 1 notify, got " .. #env2.notify_log)
+    assert(env2.notify_log[1].level == vim.log.levels.ERROR,
+      "failure_matrix_500 (null message): want ERROR level, got " .. tostring(env2.notify_log[1].level))
+    assert(env2.notify_log[1].msg:find("HTTP 500", 1, true),
+      "failure_matrix_500 (null message): fallback must surface 'HTTP 500', got " .. tostring(env2.notify_log[1].msg))
+  end)
+  env2.restore()
+  if not ok2 then error(err2, 0) end
 end)
 
 -- 8. failure_matrix_malformed_sse (GEN-06): malformed JSON frames are skipped
@@ -472,6 +495,31 @@ case("failure_matrix_malformed_sse", function()
   end)
   env.restore()
   if not ok then error(err, 0) end
+
+  -- WR-01 re-prove (SSE branch): an error EVENT with "message": null must
+  -- still surface an ERROR notify — the old (data.error and data.error.message)
+  -- leaked vim.NIL into error_msg and raised in ui.lua's notify concat.
+  local env3 = ui_case_begin({ input = "write fib", api_key = "sk-sweep-FAKEKEY" })
+  env3.chunks({
+    'event: error\ndata: {"type":"error","error":{"message":null}}\n\n',
+  })
+  env3.exit(0)
+  vim.wait(1000, function() return #env3.notify_log > 0 end)
+  vim.wait(50)  -- settle: the exactly-one assertion must not race a second notify
+  local ok3, err3 = pcall(function()
+    assert(#env3.notify_log == 1,
+      "failure_matrix_malformed_sse (null message): want exactly 1 notify, got " .. #env3.notify_log)
+    assert(env3.notify_log[1].level == vim.log.levels.ERROR,
+      "failure_matrix_malformed_sse (null message): want ERROR level, got " .. tostring(env3.notify_log[1].level))
+    assert(env3.notify_log[1].msg:find("Unknown API error", 1, true),
+      "failure_matrix_malformed_sse (null message): fallback 'Unknown API error' must surface, got " .. tostring(env3.notify_log[1].msg))
+    for _, e in ipairs(env3.notify_log) do
+      assert(not e.msg:find("sk-sweep", 1, true),
+        "failure_matrix_malformed_sse (null message): fixture key leaked into notify: " .. e.msg)
+    end
+  end)
+  env3.restore()
+  if not ok3 then error(err3, 0) end
 
   -- CR-01 re-prove: refusal with "explanation": null (decodes to vim.NIL —
   -- truthy userdata). The old concat raised inside on_exit BEFORE

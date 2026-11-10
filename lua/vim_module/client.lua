@@ -224,7 +224,13 @@ end
 
 function M.parse_error_body(raw_stdout)
   local ok, decoded = pcall(vim.json.decode, raw_stdout)
-  if ok and type(decoded) == "table" and decoded.error and decoded.error.message then
+  -- WR-01: only a plain string message is returned. JSON "message": null
+  -- decodes to vim.NIL (truthy) and "message": {...} to a table — both used
+  -- to reach ui.lua's notify concat and raise there, silently losing the
+  -- forced-failure notification (GEN-06 / T-05-06). Non-strings fall back
+  -- at the caller ("HTTP <status>").
+  if ok and type(decoded) == "table" and type(decoded.error) == "table"
+     and type(decoded.error.message) == "string" then
     return decoded.error.message
   end
   return nil
@@ -290,7 +296,12 @@ function M.generate(opts)
       local ok, data = pcall(vim.json.decode, data_str)
       if not ok or type(data) ~= "table" then return end
       if data.type == "error" or event_name == "error" then
-        state.error_msg = (data.error and data.error.message) or "Unknown API error"
+        -- WR-01: type-guard — data.error may be a number/boolean (indexing it
+        -- raises inside the fast-event stdout handler) and message may be
+        -- JSON null (vim.NIL — the concat in ui.lua raises later, losing the
+        -- failure notify). Non-strings fall back to the fixed text below.
+        state.error_msg = (type(data.error) == "table" and type(data.error.message) == "string")
+          and data.error.message or "Unknown API error"
         return
       end
       if data.type == "content_block_delta" and data.delta and data.delta.type == "text_delta" then
