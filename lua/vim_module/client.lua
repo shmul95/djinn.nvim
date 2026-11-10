@@ -259,6 +259,7 @@ function M.generate(opts)
     raw_stdout = "",
     stop_reason = nil,
     stop_details = nil,
+    usage = nil,
     error_msg = nil,
     cancelled = false,
   }
@@ -304,7 +305,7 @@ function M.generate(opts)
           state.stop_reason = data.delta.stop_reason
           state.stop_details = data.delta.stop_details
         end
-        -- data.usage.output_tokens captured for Phase 5 telemetry (no-op for now)
+        if data.usage then state.usage = data.usage end
       end
       -- message_start, content_block_start, content_block_stop, message_stop: lifecycle no-ops
     end)
@@ -364,7 +365,7 @@ function M.generate(opts)
             opts.on_complete("Model refused the request")
           end
         else
-          opts.on_complete(nil)
+          opts.on_complete(nil, state.usage)
         end
       else
         -- Non-2xx: error body is plain JSON (NOT SSE)

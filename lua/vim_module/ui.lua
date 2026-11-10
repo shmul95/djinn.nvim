@@ -129,7 +129,7 @@ local q = require("vim_module.queue").new({
       on_lines = function(lines)
         require("vim_module.stream").enqueue(record.stream_job, record.filter and record.filter(lines) or lines)
       end,
-      on_complete = function(complete_err)
+      on_complete = function(complete_err, usage)
         -- FAST EVENT: stream.finish is safe (self-scheduling); editor work in
         -- vim.schedule.
         require("vim_module.stream").finish(record.stream_job)
@@ -139,6 +139,15 @@ local q = require("vim_module.queue").new({
           vim.schedule(function()
             paint_status(record.stream_job, " ✗ failed ", "ErrorMsg")  -- settle-aware (pending_count gate)
             vim.notify("vim-module: " .. complete_err, vim.log.levels.ERROR)
+          end)
+        elseif not record.cancel_requested and type(usage) == "table"
+          and type(usage.output_tokens) == "number" then
+          -- Phase 5 telemetry (CTX-02 budget visibility). Exact text per
+          -- 05-RESEARCH.md — NO "vim-module: " prefix (the format string is
+          -- binding). %d + the type guard mean only a number can appear;
+          -- prompt/digest/headers never enter a notify (T-05-01).
+          vim.schedule(function()
+            vim.notify(string.format("✓ done (%d tok)", usage.output_tokens), vim.log.levels.INFO)
           end)
         end
         -- Deferred: on_complete runs in a FAST EVENT (vim.system on_exit) and
