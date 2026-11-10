@@ -1,4 +1,4 @@
-# vim-module
+# djinn.nvim
 
 An AI function-generation plugin for Neovim: press `<D-f>`, type a request ("write me a fibonacci function"), and generated code streams into the buffer starting at the cursor line. Fire-and-forget granularity — function by function, no chat — packaged as a Nix flake consumed by cabanashmul.
 
@@ -11,18 +11,18 @@ Wire the flake into cabanashmul with two artifacts (final form — the wiring be
 `flake.nix` inputs (in `/home/shmul95/Repositories/cabanashmul/flake.nix`):
 
 ```nix
-vim-module.url                    = "github:shmul95/vim-module";
-vim-module.inputs.nixpkgs.follows = "nixpkgs";
+djinn.url                    = "github:shmul95/djinn.nvim";
+djinn.inputs.nixpkgs.follows = "nixpkgs";
 ```
 
-`public/vim-module.nix` (new file in `/home/shmul95/Repositories/cabanashmul/public/`):
+`public/djinn.nix` (new file in `/home/shmul95/Repositories/cabanashmul/public/`):
 
 ```nix
 { inputs, ... }: {
-  flake.cabanashmul.homeModules.vim-module = { ... }: {
-    imports = [ inputs.vim-module.homeManagerModules.default ];
+  flake.cabanashmul.homeModules.djinn = { ... }: {
+    imports = [ inputs.djinn.homeManagerModules.default ];
 
-    programs.vim-module = {
+    programs.djinn = {
       enable = true;
       model  = "claude-haiku-4-5";
     };
@@ -34,7 +34,7 @@ Note: `import-tree ./public` picks the file up automatically — `_builder.nix` 
 
 ## Options
 
-All options live under `programs.vim-module.*` (home-manager):
+All options live under `programs.djinn.*` (home-manager):
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -58,15 +58,15 @@ The invariant: never log request payloads or headers — they may carry API keys
 Only two actions remain before the module is live — everything else is automated:
 
 1. **Publish** — create and push the GitHub repo, choosing visibility:
-   `gh repo create shmul95/vim-module [--public|--private] --source . --push`
-   (if private, the cabanashmul input must switch to `git+ssh://git@github.com/shmul95/vim-module`).
+   `gh repo create shmul95/djinn.nvim [--public|--private] --source . --push`
+   (if private, the cabanashmul input must switch to `git+ssh://git@github.com/shmul95/djinn.nvim`).
 2. **Switch** — point cabanashmul at the published repo and rebuild the profile:
-   `cd /home/shmul95/Repositories/cabanashmul && nix flake update vim-module && home-manager switch --flake /home/shmul95/Repositories/cabanashmul`
+   `cd /home/shmul95/Repositories/cabanashmul && nix flake update djinn && home-manager switch --flake /home/shmul95/Repositories/cabanashmul`
    (or `scripts/build-profiles.sh && scripts/switch-profile.sh <profile>`).
 
-Then verify in nvim: `:lua print(require('vim_module'))`, and verify `.planning` never entered the store: `cd /home/shmul95/Repositories/vim-module && nix build && test ! -e result/.planning` (also `git check-ignore -q .planning`).
+Then verify in nvim: `:lua print(require('djinn'))`, and verify `.planning` never entered the store: `cd /home/shmul95/Repositories/vim-module && nix build && test ! -e result/.planning` (also `git check-ignore -q .planning`).
 
-WARNING: Until the GitHub repo exists and `nix flake update vim-module` runs, any cabanashmul build WITHOUT `--override-input` fails resolving the `vim-module` input. Local verification uses `--override-input vim-module path:/home/shmul95/Repositories/vim-module` and does not depend on the remote.
+WARNING: Until the GitHub repo exists and `nix flake update djinn` runs, any cabanashmul build WITHOUT `--override-input` fails resolving the `djinn` input. Local verification uses `--override-input djinn path:/home/shmul95/Repositories/vim-module` and does not depend on the remote.
 
 ## Development
 
