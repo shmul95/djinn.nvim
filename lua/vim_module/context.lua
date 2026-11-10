@@ -238,6 +238,58 @@ function M.render_digest(manifest)
     .. "\n</project_docs>"
 end
 
+-- Budget packing (CTX-02). Priority when over budget:
+--   request (NEVER truncated) > buffer slice > digest (truncate digest tail first).
+-- opts: request (string), slice (string), digest (string|nil), budget_chars (number)
+-- returns: user_content (string), digest_truncated (boolean), digest_dropped (boolean)
+local DIGEST_OPEN = "<project_files>\n"
+local DIGEST_CLOSE = "\n</project_files>\n\n"
+local DIGEST_OVERHEAD = #DIGEST_OPEN + #DIGEST_CLOSE
+local REQUEST_PREFIX = "\n\nRequest: "
+
+function M.pack(opts)
+  local request = opts.request or ""
+  local slice = opts.slice or ""
+  local digest = opts.digest
+  local budget = opts.budget_chars or 0
+  local digest_truncated = false
+  local digest_dropped = false
+
+  local tail = slice .. REQUEST_PREFIX .. request
+
+  -- Digest block only when digest is non-nil and non-empty.
+  if digest ~= nil and digest ~= "" then
+    local avail = budget - #tail
+    if #digest + DIGEST_OVERHEAD <= avail then
+      -- full digest fits
+    elseif avail - DIGEST_OVERHEAD > 0 then
+      digest = digest:sub(1, avail - DIGEST_OVERHEAD)
+      digest_truncated = true
+    else
+      digest = nil
+      digest_dropped = true
+    end
+  end
+
+  local user_content
+  if digest ~= nil and digest ~= "" then
+    user_content = DIGEST_OPEN .. digest .. DIGEST_CLOSE .. tail
+  else
+    user_content = tail
+  end
+
+  -- Slice truncation only when still over budget (digest already handled).
+  if #user_content > budget then
+    local req_part = REQUEST_PREFIX .. request
+    local max_slice = budget - #req_part
+    if max_slice < 0 then max_slice = 0 end
+    slice = slice:sub(1, max_slice)
+    user_content = slice .. req_part
+  end
+
+  return user_content, digest_truncated, digest_dropped
+end
+
 -- cache ------------------------------------------------------------------
 
 -- stdpath("cache") .. "/vim-module/" .. sha256(root) .. ".json" — never
