@@ -11,6 +11,7 @@ local REQUIRED = {
   "state_transitions",
   "cancel_running_leaves_queued",
   "cancel_all_drains_without_start",
+  "cancel_all_sync_settle_never_starts_drained",
   "start_throw_fails_and_pumps",
   "double_done_ignored",
 }
@@ -234,6 +235,40 @@ case("cancel_all_drains_without_start", function()
     "cancel_all_drains_without_start: job 2 want chain 'queued->cancelled', got '" .. rec.chain(2) .. "'")
   assert(rec.chain(3) == "queued->cancelled",
     "cancel_all_drains_without_start: job 3 want chain 'queued->cancelled', got '" .. rec.chain(3) .. "'")
+end)
+
+case("cancel_all_sync_settle_never_starts_drained", function()
+  -- WR-01: handle.cancel() MAY settle done() synchronously (the contract says
+  -- done must "eventually" fire — sync is allowed). cancel_all must drain the
+  -- queued jobs BEFORE delegating the running handle, so the sync settle's
+  -- _pump can never start a drained job.
+  local starts = {}
+  local q = queue.new({
+    start = function(payload, done)
+      starts[#starts + 1] = payload
+      return {
+        cancel = function()
+          done("cancelled")  -- synchronous settle
+        end,
+      }
+    end,
+  })
+  q:submit("A")
+  q:submit("B")
+  q:submit("C")
+  local drained = q:cancel_all()
+  assert(order_of(drained) == "2,3",
+    "cancel_all_sync_settle_never_starts_drained: want drained ids {2,3}, got " .. id_list(drained))
+  assert(order_of(starts) == "A",
+    "cancel_all_sync_settle_never_starts_drained: drained jobs must never start (sync settle pumped one), got starts "
+      .. order_of(starts))
+  assert(q:get(1).status == "cancelled" and q:get(2).status == "cancelled" and q:get(3).status == "cancelled",
+    "cancel_all_sync_settle_never_starts_drained: all jobs must be cancelled, got "
+      .. q:get(1).status .. "/" .. q:get(2).status .. "/" .. q:get(3).status)
+  assert(q:is_running() == false,
+    "cancel_all_sync_settle_never_starts_drained: queue must be idle after cancel_all")
+  assert(q:pending_count() == 0,
+    "cancel_all_sync_settle_never_starts_drained: nothing may remain queued")
 end)
 
 case("start_throw_fails_and_pumps", function()

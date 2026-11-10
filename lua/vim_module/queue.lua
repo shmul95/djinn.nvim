@@ -43,7 +43,9 @@ function q:_transition(job, old_status, new_status)
 end
 
 function q:_pump()
-  if self.running_id ~= nil then
+  -- WR-01: _cancelling latched while cancel_all drains — a synchronous
+  -- handle.cancel() -> done() settle must never pump new work mid-drain.
+  if self.running_id ~= nil or self._cancelling then
     return
   end
   while true do
@@ -116,7 +118,11 @@ end
 -- directly (opts.start never called for them). Returns the list of drained ids
 -- (queued jobs only).
 function q:cancel_all()
-  self:cancel_running()
+  -- WR-01: drain-then-cancel. The queued jobs are collected and cancelled
+  -- FIRST (and _cancelling latches _pump shut), and only then is the running
+  -- handle delegated — a synchronous done() from handle.cancel() can then
+  -- pump nothing, so drained jobs never start.
+  self._cancelling = true
   local drained = {}
   for i = self.head, #self.jobs do
     local job = self.jobs[i]
@@ -126,6 +132,9 @@ function q:cancel_all()
       drained[#drained + 1] = job.id
     end
   end
+  self:cancel_running()
+  self._cancelling = false
+  self:_pump()  -- service any job submitted re-entrantly during the drain
   return drained
 end
 
