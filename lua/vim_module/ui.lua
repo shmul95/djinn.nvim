@@ -47,10 +47,14 @@ local function make_continuation_filter(buf, header_line)
     end
     return w
   end
+  -- WR-02: a blank/empty anchor makes every whitespace-only body line
+  -- trimmed-identical to the header — skip the strip entirely in that case
+  -- (blank lines are real output per stream.accumulate's contract).
+  local do_strip = trimmed_header ~= ""
   return function(lines)
     local out = {}
     for _, line in ipairs(lines) do
-      if vim.trim(line) == trimmed_header then
+      if do_strip and vim.trim(line) == trimmed_header then
         goto continue  -- defensive signature-strip (trimmed-identical to header)
       end
       if line:match("^%s*$") then

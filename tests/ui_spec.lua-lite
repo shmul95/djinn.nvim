@@ -22,6 +22,7 @@ local REQUIRED = {
   "generate_mode_unfiltered",
   "continuation_indent_tabs",
   "continuation_filter_fast_event_safe",
+  "continuation_blank_anchor_preserves_blanks",
   "digest_passed_to_generate",
 }
 local function case(name, fn)
@@ -717,6 +718,34 @@ case("continuation_filter_fast_event_safe", function()
     "continuation_filter_fast_event_safe: body must land from a fast-event on_lines (E5560 regression), got " .. vim.inspect(lines))
   opts1.on_complete(nil)
   vim.wait(50)
+  restore_ctx()
+  restore_env(env)
+end)
+
+case("continuation_blank_anchor_preserves_blanks", function()
+  -- WR-02: with a blank/empty anchor the trimmed-identical signature-strip
+  -- would eat every blank body line (vim.trim("") == ""). Blank lines are
+  -- real output and must survive the filter.
+  local restore_ctx = stub_digest("DIGEST-SENTINEL")
+  local env = fresh_env("finish this", function(opts)
+    opts.on_lines({ "a = 1", "", "b = 2" })
+    opts.on_complete(nil)
+  end)
+  vim.api.nvim_buf_set_lines(env.buf, 0, -1, false, { "x = 1", "", "y = 2" })
+  vim.api.nvim_win_set_cursor(0, { 2, 0 })  -- row 1 = the blank anchor line
+  vim.bo[env.buf].expandtab = true
+  vim.bo[env.buf].shiftwidth = 4
+  safe_input(env)
+  env.ui.start(env.config)
+  assert(env.captured_opts and env.captured_opts.mode == "continuation",
+    "continuation_blank_anchor_preserves_blanks: request word must trigger continuation on a blank anchor")
+  vim.wait(2000, function()
+    local l = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+    return #l == 6
+  end, 10)
+  local lines = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+  assert(vim.deep_equal(lines, { "x = 1", "", "    a = 1", "", "    b = 2", "y = 2" }),
+    "continuation_blank_anchor_preserves_blanks: blank body line must survive under a blank anchor, got " .. vim.inspect(lines))
   restore_ctx()
   restore_env(env)
 end)
