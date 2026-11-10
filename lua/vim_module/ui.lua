@@ -58,6 +58,15 @@ function M.start(config)
       return
     end
 
+    -- Re-check busy HERE: async input UIs let two M.start calls open both
+    -- prompts before either submits (the entry guard above only ran before
+    -- vim.ui.input). The check-to-claim window below is fully synchronous —
+    -- no yield between this check and busy = true.
+    if busy then
+      vim.notify("vim-module: already generating (cancel first)", vim.log.levels.WARN)
+      return
+    end
+
     -- Create the generation region at the CAPTURED buf/row (not re-read from
     -- the cursor here — it may have moved during the prompt).
     local stream = require("vim_module.stream")

@@ -10,6 +10,7 @@ local REQUIRED = {
   "error_paints_failure_marker",
   "busy_refuses_second_job",
   "sync_raise_clears_busy",
+  "busy_race_second_submit_refused",
 }
 local function case(name, fn)
   cases[#cases + 1] = { name = name, fn = fn }
@@ -226,6 +227,43 @@ case("sync_raise_clears_busy", function()
   end
 
   -- Release the second job at the end of the case.
+  env.captured_opts.on_complete(nil)
+  vim.wait(50)
+  restore_env(env)
+end)
+
+case("busy_race_second_submit_refused", function()
+  -- WR-03: async-UI race — BOTH prompts open before either submits (the
+  -- entry guard cannot see the un-submitted first job). The second submit
+  -- must be refused by the in-callback busy re-check.
+  local env = fresh_env("first")  -- generate stub does NOT fire on_complete
+  local pending = {}
+  vim.ui.input = function(opts, cb)
+    env.input_calls = env.input_calls + 1
+    pending[#pending + 1] = cb
+  end
+  env.ui.start(env.config)
+  env.ui.start(env.config)
+  assert(#pending == 2, "busy_race_second_submit_refused: both prompts must open before either submits")
+
+  pending[1]("first")  -- first submit claims busy and generates
+  assert(env.generate_calls == 1, "busy_race_second_submit_refused: first submit must generate")
+
+  pending[2]("second")  -- second submit arrives while busy: must be refused
+  assert(env.generate_calls == 1,
+    "busy_race_second_submit_refused: second submit must NOT generate (busy re-check), got generate_calls=" .. env.generate_calls)
+  assert(env.create_calls == 1,
+    "busy_race_second_submit_refused: second submit must not create a stream region, got create_calls=" .. env.create_calls)
+
+  local warned = false
+  for _, n in ipairs(env.notify_log) do
+    if type(n.msg) == "string" and n.msg:find("already generating", 1, true) and n.level == vim.log.levels.WARN then
+      warned = true
+    end
+  end
+  assert(warned, "busy_race_second_submit_refused: must notify already generating at WARN level")
+
+  -- Release the first job at the end of the case.
   env.captured_opts.on_complete(nil)
   vim.wait(50)
   restore_env(env)
