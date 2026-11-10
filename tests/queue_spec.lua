@@ -94,6 +94,12 @@ case("fifo_order", function()
   end
   assert(order_of(h.start_calls) == "1",
     "fifo_order: want start order 1 after 3 submits, got " .. order_of(h.start_calls))
+  -- while A runs: A running, B queued, both B and C pending
+  assert(q:get(1).status == "running" and q:get(2).status == "queued",
+    "fifo_order: want job1 running / job2 queued, got "
+      .. q:get(1).status .. "/" .. q:get(2).status)
+  assert(q:pending_count() == 2,
+    "fifo_order: want pending_count 2 (B and C queued), got " .. q:pending_count())
   h.done_fns[1]("done")
   assert(order_of(h.start_calls) == "1,2",
     "fifo_order: want start order 1,2 after done(1), got " .. order_of(h.start_calls))
@@ -121,8 +127,8 @@ case("sequential_no_overlap", function()
     "sequential_no_overlap: job 1 want running, got " .. q:get(1).status)
   assert(q:get(2).status == "queued",
     "sequential_no_overlap: job 2 want queued, got " .. q:get(2).status)
-  assert(q:pending_count() == 2,
-    "sequential_no_overlap: want pending_count 2 (queued, not running), got " .. q:pending_count())
+  assert(q:pending_count() == 1,
+    "sequential_no_overlap: want pending_count 1 (queued, not running), got " .. q:pending_count())
   h.done_fns[1]("done")
   assert(#h.start_calls == 2,
     "sequential_no_overlap: want 2 starts after done(1), got " .. #h.start_calls)
