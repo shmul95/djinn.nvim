@@ -891,10 +891,26 @@ case("readme_manual_steps_and_version", function()
     "readme_manual_steps_and_version: README missing 'home-manager switch' (switch step)")
   assert(readme:find("**Version 0.1.0**", 1, true),
     "readme_manual_steps_and_version: README missing '**Version 0.1.0**'")
-  for m in readme:gmatch("sk%-[A-Za-z0-9]+") do
+  -- WR-03: real keys are dash-shaped (sk-ant-api03-...) — the old
+  -- sk%-[A-Za-z0-9]+ truncated at the first dash ("sk-ant", 6 chars, passed
+  -- #m < 11). Scan dash-inclusive runs and ban the sk-ant prefix outright.
+  local KEY_PAT = "sk%-[A-Za-z0-9_%-]+"
+  assert(not readme:find("sk-ant", 1, true),
+    "readme_manual_steps_and_version: sk-ant literal in README")
+  for m in readme:gmatch(KEY_PAT) do
     assert(#m < 11,
       "readme_manual_steps_and_version: key-shaped literal in README: " .. m)
   end
+  -- WR-03 seeded-red self-check (fixture literal only — NEVER a real key):
+  -- the pattern must flag a realistic sk-ant-api03 shape. Truncating KEY_PAT
+  -- back to sk%-[A-Za-z0-9]+ makes this assert red.
+  local seeded = "sk-ant-api03-FAKEseedKEYfixture"
+  local flagged = false
+  for m in seeded:gmatch(KEY_PAT) do
+    if #m >= 11 then flagged = true end
+  end
+  assert(flagged,
+    "readme_manual_steps_and_version: key-shape pattern misses realistic sk-ant-api03 keys (WR-03 self-check)")
 end)
 
 -- 17. packaging_verify_only (T-05-08): flake.nix/home-manager.nix byte-untouched
