@@ -18,6 +18,7 @@ local REQUIRED = {
   "cancel_keeps_partial",
   "fence_stripping",
   "proxy_status_takes_last_line",
+  "temp_files_cleaned_on_error",
 }
 local function case(name, fn)
   cases[#cases + 1] = { name = name, fn = fn }
@@ -107,6 +108,32 @@ local function read_file(path)
   local content = f:read("*a")
   f:close()
   return content
+end
+
+-- Temp-file lifecycle assertions (WR-04, CFG-02/T-3-03: unlinked on every
+-- exit path — success, error, cancel).
+local function temp_paths(fake)
+  local argv = fake.captured_argv()
+  assert(argv, "temp_paths: no captured argv")
+  return {
+    header = assert(extract_path(argv, "--header"), "temp_paths: no --header path"),
+    body = assert(extract_path(argv, "--data-binary"), "temp_paths: no --data-binary path"),
+    dump = assert(extract_path(argv, "--dump-header"), "temp_paths: no --dump-header path"),
+  }
+end
+
+local function assert_exist(paths, name)
+  for kind, p in pairs(paths) do
+    assert(vim.uv.fs_stat(p) ~= nil,
+      name .. ": " .. kind .. " temp file must exist before exit: " .. p)
+  end
+end
+
+local function assert_cleaned(paths, name)
+  for kind, p in pairs(paths) do
+    assert(vim.uv.fs_stat(p) == nil,
+      name .. ": " .. kind .. " temp file leaked after exit: " .. p)
+  end
 end
 
 -- 1. body_contract
@@ -206,10 +233,13 @@ case("happy_stream", function()
     fake.fire_stdout('event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n')
     fake.fire_stdout('event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}\n\n')
     fake.fire_stdout('event: message_stop\ndata: {"type":"message_stop"}\n\n')
+    local paths = temp_paths(fake)
+    assert_exist(paths, "happy_stream")
     fake.fire_exit(0, 0)
     assert(#lines == 2 and lines[1] == "line1" and lines[2] == "line2",
       "happy_stream: lines want {line1,line2} got {" .. table.concat(lines, ",") .. "}")
     assert(done_err == nil, "happy_stream: on_complete err want nil got " .. tostring(done_err))
+    assert_cleaned(paths, "happy_stream")  -- success path: temp files unlinked
   end)
 end)
 
@@ -346,8 +376,11 @@ case("cancel_keeps_partial", function()
       "cancel_keeps_partial: partial must arrive, got {" .. table.concat(lines, ",") .. "}")
     h:cancel()
     assert(fake.killed(), "cancel_keeps_partial: kill must have been called")
+    local paths = temp_paths(fake)
+    assert_exist(paths, "cancel_keeps_partial")
     fake.fire_exit(0, 0)
     assert(done_err == nil, "cancel_keeps_partial: cancel is not an error, got " .. tostring(done_err))
+    assert_cleaned(paths, "cancel_keeps_partial")  -- cancel path: temp files unlinked
   end)
 end)
 
@@ -390,6 +423,31 @@ case("proxy_status_takes_last_line", function()
   os.remove(path)
   assert(status == 429,
     "proxy_status_takes_last_line: want 429 (last line wins over proxy CONNECT 200) got " .. tostring(status))
+end)
+
+-- 13. temp_files_cleaned_on_error (WR-04): the error exit path must unlink
+-- header/body/dump too — the header file carries the API key (CFG-02/T-3-03:
+-- unlinked on every exit path: success, error, cancel).
+case("temp_files_cleaned_on_error", function()
+  with_fake({ dump_headers = "HTTP/2 500\n\n", exit_code = 22 }, function(fake)
+    local buf = make_buf()
+    local done_err = "pending"
+    client.generate({
+      config = make_config(),
+      prompt = "test",
+      buf = buf,
+      row = 0,
+      on_lines = function() end,
+      on_complete = function(e) done_err = e end,
+    })
+    local paths = temp_paths(fake)
+    assert_exist(paths, "temp_files_cleaned_on_error")
+    fake.fire_stdout('{"type":"error","error":{"type":"internal_error","message":"boom"}}')
+    fake.fire_exit(22, 0)
+    assert(type(done_err) == "string" and done_err:find("boom", 1, true),
+      "temp_files_cleaned_on_error: want error 'boom', got " .. tostring(done_err))
+    assert_cleaned(paths, "temp_files_cleaned_on_error")
+  end)
 end)
 
 -- REQUIRED case enforcement
