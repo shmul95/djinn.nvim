@@ -9,16 +9,12 @@ local client = require("vim_module.client")
 local cases = {}
 -- Plan 01 seeds the list; Plan 03 extends it with the remaining checklist rows.
 local REQUIRED = {
-  "telemetry_completion_notify",
-  "telemetry_absent_noop",
-  "failure_matrix_429",
-  "failure_matrix_missing_key",
-  "failure_matrix_401",
-  "failure_matrix_500",
-  "failure_matrix_malformed_sse",
-  "failure_matrix_network_down",
-  "progressive_landing",
-  "cancel_kills_process_and_cleans",
+  "telemetry_completion_notify", "telemetry_absent_noop", "failure_matrix_429",
+  "failure_matrix_missing_key", "failure_matrix_401", "failure_matrix_500",
+  "failure_matrix_malformed_sse", "failure_matrix_network_down",
+  "progressive_landing", "cancel_kills_process_and_cleans",
+  "key_hygiene_static", "cold_start_body_only_requires", "cited_proofs_exist",
+  "readme_options_sync", "readme_manual_steps_and_version", "packaging_verify_only",
 }
 local function case(name, fn)
   cases[#cases + 1] = { name = name, fn = fn }
@@ -561,6 +557,235 @@ case("cancel_kills_process_and_cleans", function()
     assert_cleaned(paths, "cancel_kills_process_and_cleans")
   end)
   vim.env.TEST_SWEEP_KEY = nil
+end)
+
+-- 12. key_hygiene_static (CFG-02/T-05-05/T-05-07): repo-wide scan battery.
+-- R1: api_key interpolation only inside build_headers (ALL lua files).
+-- R2: build_curl_args body is key-free. R3: no key-shaped literals in lua/.
+-- Comment lines dropped, string literals stripped for R1 (self-invalidating gate).
+case("key_hygiene_static", function()
+  -- Walk lua/ and tests/ for *.lua and *.lua-lite files
+  local files = {}
+  local function walk(dir)
+    local fd = vim.uv.fs_scandir(dir)
+    if not fd then return end
+    while true do
+      local name, typ = vim.uv.fs_scandir_next(fd)
+      if not name then break end
+      local full = dir .. "/" .. name
+      if typ == "directory" then
+        walk(full)
+      elseif name:match("%.lua$") or name:match("%.lua%-lite$") then
+        files[#files + 1] = full
+      end
+    end
+  end
+  walk(root .. "/lua")
+  walk(root .. "/tests")
+  assert(#files == 15, "key_hygiene_static: expected 15 lua files, got " .. #files)
+
+  -- Locate build_headers body in client.lua (first ^function M%.build_headers .. first ^end after it)
+  local client_text = read_file(root .. "/lua/vim_module/client.lua")
+  assert(client_text, "key_hygiene_static: cannot read client.lua")
+  local bh_start, bh_end
+  do
+    local lines = {}
+    for line in client_text:gmatch("[^\n]+") do lines[#lines + 1] = line end
+    local in_bh = false
+    for i, line in ipairs(lines) do
+      if line:match("^function M%.build_headers") then
+        bh_start = i
+        in_bh = true
+      elseif in_bh and line:match("^end") then
+        bh_end = i
+        break
+      end
+    end
+  end
+  assert(bh_start and bh_end, "key_hygiene_static: cannot locate build_headers body in client.lua")
+
+  -- Locate build_curl_args body in client.lua
+  local bca_start, bca_end
+  do
+    local lines = {}
+    for line in client_text:gmatch("[^\n]+") do lines[#lines + 1] = line end
+    local in_bca = false
+    for i, line in ipairs(lines) do
+      if line:match("^function M%.build_curl_args") then
+        bca_start = i
+        in_bca = true
+      elseif in_bca and line:match("^end") then
+        bca_end = i
+        break
+      end
+    end
+  end
+  assert(bca_start and bca_end, "key_hygiene_static: cannot locate build_curl_args body in client.lua")
+
+  for _, filepath in ipairs(files) do
+    local text = read_file(filepath)
+    assert(text, "key_hygiene_static: cannot read " .. filepath)
+    local rel = filepath:sub(#root + 2)  -- e.g. "lua/vim_module/client.lua"
+    local lines = {}
+    for line in text:gmatch("[^\n]+") do lines[#lines + 1] = line end
+
+    for lineno, line in ipairs(lines) do
+      -- a. Drop comment lines
+      if not line:match("^%s*%-%-") then
+        -- b. Strip string literals for R1
+        local stripped = line:gsub('".-"', '""'):gsub("'.-'", "''")
+
+        -- c. R1: standalone api_key (not api_key_env) co-occurring with ..
+        local pos = 1
+        while true do
+          local s, e = stripped:find("api_key", pos)
+          if not s then break end
+          local after = stripped:sub(e + 1, e + 1)
+          if after ~= "_" then
+            -- standalone api_key found — check for .. on same line
+            if stripped:find("%.%.", 1) then
+              -- MUST lie inside build_headers body of client.lua
+              local in_bh = (rel == "lua/vim_module/client.lua" and lineno >= bh_start and lineno <= bh_end)
+              assert(in_bh,
+                "key_hygiene_static R1: api_key concatenated outside build_headers at " .. rel .. ":" .. lineno)
+            end
+          end
+          pos = e + 1
+        end
+
+        -- d. R2: build_curl_args body must be key-free
+        if rel == "lua/vim_module/client.lua" and lineno >= bca_start and lineno <= bca_end then
+          assert(not stripped:find("api_key"), "key_hygiene_static R2: api_key in build_curl_args at " .. rel .. ":" .. lineno)
+          assert(not line:find("x-api-key", 1, true), "key_hygiene_static R2: x-api-key in build_curl_args at " .. rel .. ":" .. lineno)
+          assert(not line:find("sk-", 1, true), "key_hygiene_static R2: sk- in build_curl_args at " .. rel .. ":" .. lineno)
+        end
+
+        -- e. R3: no key-shaped literals in lua/ files only
+        if rel:match("^lua/") then
+          assert(not line:find("sk-ant", 1, true),
+            "key_hygiene_static R3: sk-ant literal in shipped code at " .. rel .. ":" .. lineno)
+          assert(not line:find("sk%-[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]"),
+            "key_hygiene_static R3: key-shaped literal (sk- + 8 alnum) at " .. rel .. ":" .. lineno)
+        end
+      end
+    end
+  end
+end)
+
+-- 13. cold_start_body_only_requires (CTX-01): every non-comment require( in
+-- init.lua is indented (function-body-only — nothing loads before first trigger).
+-- cites: context_spec.startup_loads_no_context (package.loaded gate).
+case("cold_start_body_only_requires", function()
+  local text = read_file(root .. "/lua/vim_module/init.lua")
+  assert(text, "cold_start_body_only_requires: cannot read init.lua")
+  for line in text:gmatch("[^\n]+") do
+    if not line:match("^%s*%-%-") then
+      if line:find("require(", 1, true) then
+        assert(line:match("^%s"),
+          "cold_start_body_only_requires: top-level require( found (must be function-body-only): " .. line)
+      end
+    end
+  end
+  assert(vim.fn.isdirectory(root .. "/plugin") == 0,
+    "cold_start_body_only_requires: plugin/ dir must not exist (would source at startup)")
+end)
+
+-- 14. cited_proofs_exist (GEN-02/03/04/05, QUEUE-01/02, CFG-02): the cited
+-- case names are present in their spec files — citation drift = red.
+case("cited_proofs_exist", function()
+  local citations = {
+    { file = "tests/stream_spec.lua", name = "append_at_end_basic" },
+    { file = "tests/stream_spec.lua", name = "user_inserts_line_above" },
+    { file = "tests/stream_spec.lua", name = "multi_flush_single_undo" },
+    { file = "tests/client_spec.lua", name = "cancel_keeps_partial" },
+    { file = "tests/client_spec.lua", name = "temp_files_cleaned_on_error" },
+    { file = "tests/client_spec.lua", name = "key_not_in_argv" },
+    { file = "tests/ui_spec.lua-lite", name = "undo_block_per_job" },
+    { file = "tests/ui_spec.lua-lite", name = "cancel_all_drains_zero_change" },
+    { file = "tests/queue_spec.lua", name = "cancel_all_drains_without_start" },
+    { file = "tests/queue_spec.lua", name = "cancel_all_sync_settle_never_starts_drained" },
+  }
+  local file_cache = {}
+  for _, c in ipairs(citations) do
+    if not file_cache[c.file] then
+      file_cache[c.file] = read_file(root .. "/" .. c.file)
+    end
+    assert(file_cache[c.file], "cited_proofs_exist: cannot read " .. c.file)
+    assert(file_cache[c.file]:find(c.name, 1, true),
+      "cited_proofs_exist: cited case '" .. c.name .. "' not found in " .. c.file)
+  end
+end)
+
+-- 15. readme_options_sync (CFG-03): README options table matches
+-- home-manager.nix defaults exactly (8 paired fragments + row count).
+case("readme_options_sync", function()
+  local readme = read_file(root .. "/README.md")
+  local hmn = read_file(root .. "/home-manager.nix")
+  assert(readme, "readme_options_sync: cannot read README.md")
+  assert(hmn, "readme_options_sync: cannot read home-manager.nix")
+
+  local pairs_to_check = {
+    { hmn = 'default = false', readme = '| `enable` | bool | `false` |' },
+    { hmn = 'default = "claude-haiku-4-5"', readme = '| `model` | str | `claude-haiku-4-5` |' },
+    { hmn = 'default = "<D-f>"', readme = '| `keymap` | str | `<D-f>` |' },
+    { hmn = 'default = "<leader>af"', readme = '| `fallback_keymap` | str | `<leader>af` |' },
+    { hmn = 'default = "ANTHROPIC_API_KEY"', readme = '| `api_key_env` | str | `ANTHROPIC_API_KEY` |' },
+    { hmn = 'default = lib.getExe pkgs.curl', readme = '| `curl_bin` | str | `lib.getExe pkgs.curl` |' },
+    { hmn = 'default = 4000', readme = '| `budgets.context_tokens` | int | `4000` |' },
+    { hmn = 'default = 1024', readme = '| `budgets.max_output_tokens` | int | `1024` |' },
+  }
+  for _, pair in ipairs(pairs_to_check) do
+    assert(hmn:find(pair.hmn, 1, true),
+      "readme_options_sync: home-manager.nix missing '" .. pair.hmn .. "'")
+    assert(readme:find(pair.readme, 1, true),
+      "readme_options_sync: README.md missing row '" .. pair.readme .. "'")
+  end
+
+  -- Exactly 8 option rows in README (catches stale/extra rows)
+  local row_count = 0
+  for line in readme:gmatch("[^\n]+") do
+    if line:match("^| `") then row_count = row_count + 1 end
+  end
+  assert(row_count == 8,
+    "readme_options_sync: want exactly 8 option rows in README, got " .. row_count)
+end)
+
+-- 16. readme_manual_steps_and_version (CFG-03): manual steps section present
+-- with publish + switch + Version 0.1.0; no key-shaped literals in README.
+case("readme_manual_steps_and_version", function()
+  local readme = read_file(root .. "/README.md")
+  assert(readme, "readme_manual_steps_and_version: cannot read README.md")
+  local has_manual_heading = false
+  for line in readme:gmatch("[^\n]+") do
+    if line:match("^## Manual steps") then has_manual_heading = true break end
+  end
+  assert(has_manual_heading,
+    "readme_manual_steps_and_version: README missing '## Manual steps' heading")
+  assert(readme:find("gh repo create", 1, true),
+    "readme_manual_steps_and_version: README missing 'gh repo create' (publish step)")
+  assert(readme:find("home-manager switch", 1, true),
+    "readme_manual_steps_and_version: README missing 'home-manager switch' (switch step)")
+  assert(readme:find("**Version 0.1.0**", 1, true),
+    "readme_manual_steps_and_version: README missing '**Version 0.1.0**'")
+  for m in readme:gmatch("sk%-[A-Za-z0-9]+") do
+    assert(#m < 11,
+      "readme_manual_steps_and_version: key-shaped literal in README: " .. m)
+  end
+end)
+
+-- 17. packaging_verify_only (T-05-08): flake.nix/home-manager.nix byte-untouched
+-- (VERIFY-ONLY constraint) and .planning is git-ignored (store exclusion).
+case("packaging_verify_only", function()
+  -- a. VERIFY-ONLY: packaging files unmodified
+  -- NOTE: io.popen().close() in Neovim returns true regardless of exit status;
+  -- use vim.fn.system + vim.v.shell_error for reliable exit-code checking.
+  local out = vim.fn.system("cd " .. root .. " && git diff --exit-code flake.nix home-manager.nix 2>&1")
+  assert(vim.v.shell_error == 0,
+    "packaging_verify_only: flake.nix/home-manager.nix modified — VERIFY-ONLY (constraint): " .. out)
+  -- b. .planning store exclusion
+  local out2 = vim.fn.system("cd " .. root .. " && git check-ignore -q .planning 2>&1")
+  assert(vim.v.shell_error == 0,
+    "packaging_verify_only: .planning is not git-ignored — it would enter flake/store copies: " .. out2)
 end)
 
 -- REQUIRED case enforcement
