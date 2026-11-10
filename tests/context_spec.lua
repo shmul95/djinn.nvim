@@ -14,6 +14,7 @@ local REQUIRED = {
   "denylist_fixture_readme_only",
   "symlink_denylist_no_leak",
   "cache_outside_worktree",
+  "cache_written_0600",
   "stale_file_count_triggers_refresh",
   "stale_mtime_triggers_refresh",
   "cold_get_digest_nonblocking",
@@ -222,6 +223,19 @@ case("cache_outside_worktree", function()
   assert_same_set(list_files(proj), {
     ".env", ".gitignore", "README.md", "api_key.txt", "ignored.txt", "secrets/creds.txt",
   }, "cache_outside_worktree: worktree must hold exactly the 6 fixture files")
+end)
+
+case("cache_written_0600", function()
+  -- WR-04: the cache holds the full project tree + docs text — it must be
+  -- created 0600, not world-readable (0644 like a plain io.open write).
+  local context = ctx()
+  local proj = make_fixture()
+  context.build_sync(proj)
+  local st = vim.uv.fs_stat(context.cache_path(proj))
+  assert(st ~= nil, "cache_written_0600: cache file must exist after build_sync")
+  assert(st.mode % 512 == 384,
+    "cache_written_0600: cache must be mode 0600 (384), got "
+      .. string.format("%o", st.mode % 512))
 end)
 
 case("stale_file_count_triggers_refresh", function()

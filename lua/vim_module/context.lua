@@ -334,12 +334,18 @@ end
 function M.save_cache(root, manifest)
   local dir = vim.fn.stdpath("cache") .. "/vim-module"
   vim.fn.mkdir(dir, "p")
-  local f = io.open(M.cache_path(root), "w")
-  if f == nil then
+  -- WR-04: 0600 (384) — the cache carries the full project tree and docs
+  -- text; it must not be world-readable (same mode as client.write_temp_file
+  -- key material). fs_open's mode applies at creation; fs_chmod covers
+  -- rewrites of an already-existing wider-mode file.
+  local path = M.cache_path(root)
+  local fd = vim.uv.fs_open(path, "w", 384)
+  if not fd then
     return
   end
-  f:write(vim.json.encode(manifest))
-  f:close()
+  vim.uv.fs_write(fd, vim.json.encode(manifest))
+  vim.uv.fs_close(fd)
+  vim.uv.fs_chmod(path, 384)
 end
 
 -- Pure. Staleness = file-count or max-mtime change (documented TTL is
