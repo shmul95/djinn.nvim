@@ -930,12 +930,13 @@ case("packaging_verify_only", function()
   local out = vim.fn.system("cd " .. root .. " && git diff --exit-code HEAD -- flake.nix home-manager.nix 2>&1")
   assert(vim.v.shell_error == 0,
     "packaging_verify_only: flake.nix/home-manager.nix modified (worktree/staged) — VERIFY-ONLY (constraint): " .. out)
-  -- ...and the freeze-point diff catches COMMITTED drift: f48c158 is the
-  -- last commit that legitimately touched either file (Phase 1 — "options
-  -- contract frozen"), so any later commit changing them is drift too.
-  local out1b = vim.fn.system("cd " .. root .. " && git diff --exit-code f48c158835183f1570e43f9661542cbaa2a746cc -- flake.nix home-manager.nix 2>&1")
+  -- ...and the freeze-point diff catches COMMITTED drift: 72b89a5 is the
+  -- last commit that legitimately touched either file (the djinn.nvim rename —
+  -- names-only change; semantics stay frozen), so any later commit changing
+  -- them is drift too.
+  local out1b = vim.fn.system("cd " .. root .. " && git diff --exit-code 72b89a5414e64c92b2788944e083b4ee71176575 -- flake.nix home-manager.nix 2>&1")
   assert(vim.v.shell_error == 0,
-    "packaging_verify_only: flake.nix/home-manager.nix drifted from the Phase 1 freeze point f48c158 (committed drift): " .. out1b)
+    "packaging_verify_only: flake.nix/home-manager.nix drifted from the rename freeze point 72b89a5 (committed drift): " .. out1b)
   -- b. .planning store exclusion
   local out2 = vim.fn.system("cd " .. root .. " && git check-ignore -q .planning 2>&1")
   assert(vim.v.shell_error == 0,
