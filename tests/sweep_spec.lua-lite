@@ -283,6 +283,28 @@ case("telemetry_absent_noop", function()
   assert(#env.notify_log == 0,
     "telemetry_absent_noop: success stays silent without usage — want 0 notifies, got " .. #env.notify_log)
   env.restore()
+
+  -- WR-02 re-prove: hostile usage values must never render telemetry —
+  -- -5 used to print "✓ done (-5 tok)", float 142.7 silently truncated to
+  -- "✓ done (142 tok)", 1e300/NaN rendered "-9223372036854775808 tok".
+  for _, hostile in ipairs({ "-5", "142.7", "1e300" }) do
+    local env2 = ui_case_begin({ input = "write fib", api_key = "sk-sweep-FAKEKEY" })
+    env2.chunks({
+      'event: message_start\ndata: {"type":"message_start","message":{}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"line1\\n"}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":' .. hostile .. '}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    })
+    env2.exit(0)
+    vim.wait(50)
+    for _, n in ipairs(env2.notify_log) do
+      assert(not n.msg:find("tok", 1, true),
+        "telemetry_absent_noop: hostile output_tokens " .. hostile .. " must not render telemetry, got " .. tostring(n.msg))
+    end
+    assert(#env2.notify_log == 0,
+      "telemetry_absent_noop: hostile output_tokens " .. hostile .. " must stay silent — want 0 notifies, got " .. #env2.notify_log)
+    env2.restore()
+  end
 end)
 
 -- 3. failure_matrix_429 (GEN-06 recovery path): 429 + retry-after header ->

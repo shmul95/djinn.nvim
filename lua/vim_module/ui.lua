@@ -140,15 +140,22 @@ local q = require("vim_module.queue").new({
             paint_status(record.stream_job, " ✗ failed ", "ErrorMsg")  -- settle-aware (pending_count gate)
             vim.notify("vim-module: " .. complete_err, vim.log.levels.ERROR)
           end)
-        elseif not record.cancel_requested and type(usage) == "table"
-          and type(usage.output_tokens) == "number" then
+        elseif not record.cancel_requested and type(usage) == "table" then
           -- Phase 5 telemetry (CTX-02 budget visibility). Exact text per
           -- 05-RESEARCH.md — NO "vim-module: " prefix (the format string is
-          -- binding). %d + the type guard mean only a number can appear;
-          -- prompt/digest/headers never enter a notify (T-05-01).
-          vim.schedule(function()
-            vim.notify(string.format("✓ done (%d tok)", usage.output_tokens), vim.log.levels.INFO)
-          end)
+          -- binding). prompt/digest/headers never enter a notify (T-05-01).
+          -- WR-02: the usage payload is untrusted stream JSON (T-05-01) —
+          -- accept only a bounded positive integer. math.type() does not
+          -- exist on the shipped LuaJIT, so the integer check is
+          -- n == math.floor(n) (rejects 142.7's silent "142" truncation and
+          -- NaN); > 0 rejects negatives ("✓ done (-5 tok)"); the upper bound
+          -- rejects 1e300/inf (which %d rendered as -9223372036854775808).
+          local n = usage.output_tokens
+          if type(n) == "number" and n == math.floor(n) and n > 0 and n <= 1000000 then
+            vim.schedule(function()
+              vim.notify(string.format("✓ done (%d tok)", n), vim.log.levels.INFO)
+            end)
+          end
         end
         -- Deferred: on_complete runs in a FAST EVENT (vim.system on_exit) and
         -- done() pumps the NEXT job's start (client.generate's vim.fn calls,
