@@ -63,7 +63,7 @@ local function fresh_env(scripted_input, fire_in_generate)
   }
   vim.env.TEST_UI_KEY = "sk-ui-TEST"
 
-  env.real_stream = require("vim_module.stream")
+  env.real_stream = require("djinn.stream")
   env.real_create = env.real_stream.create
   env.real_stream.create = function(buf, row, opts)
     env.create_calls = env.create_calls + 1
@@ -72,8 +72,8 @@ local function fresh_env(scripted_input, fire_in_generate)
     return env.job
   end
 
-  env.real_client = package.loaded["vim_module.client"]
-  package.loaded["vim_module.client"] = {
+  env.real_client = package.loaded["djinn.client"]
+  package.loaded["djinn.client"] = {
     generate = function(opts)
       env.generate_calls = env.generate_calls + 1
       env.captured_opts = opts
@@ -97,15 +97,15 @@ local function fresh_env(scripted_input, fire_in_generate)
 
   -- Capture the queue instance the ui module builds at load time, so cases
   -- can assert job terminal statuses via env.queue:get(id).
-  env.real_queue_mod = require("vim_module.queue")
+  env.real_queue_mod = require("djinn.queue")
   env.real_queue_new = env.real_queue_mod.new
   env.real_queue_mod.new = function(opts)
     env.queue = env.real_queue_new(opts)
     return env.queue
   end
 
-  package.loaded["vim_module.ui"] = nil
-  env.ui = require("vim_module.ui")
+  package.loaded["djinn.ui"] = nil
+  env.ui = require("djinn.ui")
   return env
 end
 
@@ -114,7 +114,7 @@ local function restore_env(env)
   vim.notify = env.real_notify
   env.real_stream.create = env.real_create
   env.real_queue_mod.new = env.real_queue_new
-  package.loaded["vim_module.client"] = env.real_client
+  package.loaded["djinn.client"] = env.real_client
 end
 
 local function assert_unchanged(env, name)
@@ -554,9 +554,9 @@ end
 
 -- Helper: stub context.get_digest, returns restore function.
 local function stub_digest(value)
-  local real = package.loaded["vim_module.context"]
-  package.loaded["vim_module.context"] = { get_digest = function() return value end }
-  return function() package.loaded["vim_module.context"] = real end
+  local real = package.loaded["djinn.context"]
+  package.loaded["djinn.context"] = { get_digest = function() return value end }
+  return function() package.loaded["djinn.context"] = real end
 end
 
 case("continuation_body_only_under_header", function()

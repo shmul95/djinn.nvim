@@ -25,7 +25,7 @@ end
 function M.create(buf, row, opts)
   opts = opts or {}
   local status_text = opts.status_text or " Generating... "
-  local ns = vim.api.nvim_create_namespace("vim_module")
+  local ns = vim.api.nvim_create_namespace("djinn")
   local job = {
     buf = buf,
     ns = ns,

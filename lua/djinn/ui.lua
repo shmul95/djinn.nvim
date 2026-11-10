@@ -91,7 +91,7 @@ local running_record = nil
 -- helper waits for pending_count(job) == 0 first (re-scheduling if needed),
 -- then repaints the SAME end mark (id = job.end_id).
 local function paint_status(job, text, hl)
-  local stream = require("vim_module.stream")
+  local stream = require("djinn.stream")
   if stream.pending_count(job) ~= 0 then
     vim.schedule(function() paint_status(job, text, hl) end)
     return
@@ -109,7 +109,7 @@ local function paint_status(job, text, hl)
 end
 
 -- Fresh per module load (the spec harness reloads ui for clean state).
-local q = require("vim_module.queue").new({
+local q = require("djinn.queue").new({
   start = function(record, done)
     -- record = { stream_job, buf, row, config, prompt }
     -- QUEUE-02: close the undo block before this job's first append so ONE
@@ -119,7 +119,7 @@ local q = require("vim_module.queue").new({
     -- of fast events (see on_complete), start always runs on the main loop.
     vim.bo[record.buf].undolevels = vim.bo[record.buf].undolevels
     paint_status(record.stream_job, " Generating... ", "Comment")
-    local ok, handle, err = pcall(require("vim_module.client").generate, {
+    local ok, handle, err = pcall(require("djinn.client").generate, {
       config = record.config,
       prompt = record.prompt,
       buf = record.buf,
@@ -127,22 +127,22 @@ local q = require("vim_module.queue").new({
       digest = record.digest,
       mode = record.mode,
       on_lines = function(lines)
-        require("vim_module.stream").enqueue(record.stream_job, record.filter and record.filter(lines) or lines)
+        require("djinn.stream").enqueue(record.stream_job, record.filter and record.filter(lines) or lines)
       end,
       on_complete = function(complete_err, usage)
         -- FAST EVENT: stream.finish is safe (self-scheduling); editor work in
         -- vim.schedule.
-        require("vim_module.stream").finish(record.stream_job)
+        require("djinn.stream").finish(record.stream_job)
         record.done_status = complete_err and "failed"
           or (record.cancel_requested and "cancelled" or "done")
         if complete_err then
           vim.schedule(function()
             paint_status(record.stream_job, " ✗ failed ", "ErrorMsg")  -- settle-aware (pending_count gate)
-            vim.notify("vim-module: " .. complete_err, vim.log.levels.ERROR)
+            vim.notify("djinn.nvim: " .. complete_err, vim.log.levels.ERROR)
           end)
         elseif not record.cancel_requested and type(usage) == "table" then
           -- Phase 5 telemetry (CTX-02 budget visibility). Exact text per
-          -- 05-RESEARCH.md — NO "vim-module: " prefix (the format string is
+          -- 05-RESEARCH.md — NO "djinn.nvim: " prefix (the format string is
           -- binding). prompt/digest/headers never enter a notify (T-05-01).
           -- WR-02: the usage payload is untrusted stream JSON (T-05-01) —
           -- accept only a bounded positive integer. math.type() does not
@@ -166,15 +166,15 @@ local q = require("vim_module.queue").new({
     })
     if not ok then
       -- sync raise: fail this job, release the queue (see spec sync_raise case)
-      require("vim_module.stream").finish(record.stream_job)
-      vim.schedule(function() vim.notify("vim-module: " .. tostring(handle), vim.log.levels.ERROR) end)
+      require("djinn.stream").finish(record.stream_job)
+      vim.schedule(function() vim.notify("djinn.nvim: " .. tostring(handle), vim.log.levels.ERROR) end)
       done("failed")
       return nil
     end
     if handle == nil then
       -- pre-flight failure
-      vim.notify("vim-module: " .. (err or "failed to start"), vim.log.levels.ERROR)
-      require("vim_module.stream").finish(record.stream_job)
+      vim.notify("djinn.nvim: " .. (err or "failed to start"), vim.log.levels.ERROR)
+      require("djinn.stream").finish(record.stream_job)
       done("failed")
       return nil
     end
@@ -211,12 +211,12 @@ function M.start(config)
 
   -- Pre-flight: refuse a doomed request up front (key + curl).
   if not vim.env[config.api_key_env] or vim.env[config.api_key_env] == "" then
-    vim.notify("vim-module: API key not found in " .. config.api_key_env .. " — set it and try again", vim.log.levels.ERROR)
+    vim.notify("djinn.nvim: API key not found in " .. config.api_key_env .. " — set it and try again", vim.log.levels.ERROR)
     return
   end
   local curl_bin = config.curl_bin or vim.fn.exepath("curl")
   if not curl_bin or curl_bin == "" then
-    vim.notify("vim-module: curl not found — install curl or set curl_bin", vim.log.levels.ERROR)
+    vim.notify("djinn.nvim: curl not found — install curl or set curl_bin", vim.log.levels.ERROR)
     return
   end
 
@@ -235,14 +235,14 @@ function M.start(config)
     local insert_row = mode == "continuation" and (row + 1) or row
 
     -- CTX-01: lazy digest — first request fetches/builds, nil on cold cache.
-    local digest = require("vim_module.context").get_digest(vim.fn.getcwd())
+    local digest = require("djinn.context").get_digest(vim.fn.getcwd())
 
     -- Create the generation region at the CAPTURED buf/row (not re-read from
     -- the cursor here — it may have moved during the prompt). The "Queued"
     -- pending indicator is painted at creation for EVERY submit — if the
     -- queue was idle the job starts immediately and on_transition repaints
     -- "Generating..." (settle-aware via paint_status).
-    local stream = require("vim_module.stream")
+    local stream = require("djinn.stream")
     local job = stream.create(buf, insert_row, { status_text = " Queued " })
     local filter = mode == "continuation" and make_continuation_filter(buf, anchor_line) or nil
     local record = {
@@ -254,9 +254,9 @@ function M.start(config)
   end)
 end
 
-function M.cancel()      -- :VimModuleCancel = cancel the RUNNING job; partial kept
+function M.cancel()      -- :DjinnCancel = cancel the RUNNING job; partial kept
   if not q:is_running() then
-    vim.notify("vim-module: no generation to cancel", vim.log.levels.INFO)
+    vim.notify("djinn.nvim: no generation to cancel", vim.log.levels.INFO)
     return
   end
   running_record.cancel_requested = true  -- BEFORE delegating so on_complete
@@ -265,7 +265,7 @@ function M.cancel()      -- :VimModuleCancel = cancel the RUNNING job; partial k
   -- on_complete(nil) -> stream.finish (partial kept) -> done("cancelled")
 end
 
-function M.cancel_all()  -- :VimModuleCancelAll = cancel running + drain queue
+function M.cancel_all()  -- :DjinnCancelAll = cancel running + drain queue
   if running_record then running_record.cancel_requested = true end
   local drained = q:cancel_all()
   -- NO separate cancel_running call: cancel_all already delegates the running
@@ -274,11 +274,11 @@ function M.cancel_all()  -- :VimModuleCancelAll = cancel running + drain queue
   for _, id in ipairs(drained) do
     local rec = records[id]
     vim.schedule(function()
-      require("vim_module.stream").finish(rec.stream_job)
+      require("djinn.stream").finish(rec.stream_job)
     end)  -- zero lines enqueued -> zero buffer change; finish clears the
           -- "Queued" status virt_text (settle-aware, same pattern as elsewhere)
   end
-  vim.notify("vim-module: queue drained", vim.log.levels.INFO)
+  vim.notify("djinn.nvim: queue drained", vim.log.levels.INFO)
 end
 
 return M

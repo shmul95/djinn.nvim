@@ -50,7 +50,7 @@ function M.write_temp_file(content)
   local path = vim.fn.tempname()
   local fd, open_err = vim.uv.fs_open(path, "w", 384)  -- 384 = 0600 octal
   if not fd then
-    error("vim-module: cannot create temp file: " .. tostring(open_err))
+    error("djinn.nvim: cannot create temp file: " .. tostring(open_err))
   end
   -- pcall: fs_write can raise on a bad fd, and its nil,err return must also
   -- count as failure. On ANY failure the just-created file is unlinked before
@@ -59,7 +59,7 @@ function M.write_temp_file(content)
   pcall(vim.uv.fs_close, fd)
   if not ok or not ret then
     pcall(vim.uv.fs_unlink, path)
-    error("vim-module: cannot write temp file: " .. tostring(write_err or ret))
+    error("djinn.nvim: cannot write temp file: " .. tostring(write_err or ret))
   end
   return path
 end
@@ -151,7 +151,7 @@ function M.build_user_content(prompt, buf, row, config, pack)
   local slice_budget = max_chars - #req_part - reserved
   if slice_budget < 0 then slice_budget = 0 end
   local slice = M.get_buffer_slice(buf, row, slice_budget)
-  return require("vim_module.context").pack({
+  return require("djinn.context").pack({
     request = prompt, slice = slice, digest = pack.digest, budget_chars = max_chars,
   })
 end
@@ -290,7 +290,7 @@ function M.generate(opts)
     local argv = M.build_curl_args(curl_bin, header_path, body_path, dump_path)
 
     -- SSE parser (require at call time)
-    local sse = require("vim_module.sse")
+    local sse = require("djinn.sse")
     local parser = sse.new(function(event_name, data_str)
       if event_name == "ping" then return end
       local ok, data = pcall(vim.json.decode, data_str)
@@ -307,7 +307,7 @@ function M.generate(opts)
       if data.type == "content_block_delta" and data.delta and data.delta.type == "text_delta" then
         local text = data.delta.text
         if text and #text > 0 then
-          local complete = require("vim_module.stream").accumulate(acc, text)
+          local complete = require("djinn.stream").accumulate(acc, text)
           local clean = stripper:filter(complete)
           if #clean > 0 then opts.on_lines(clean) end
         end

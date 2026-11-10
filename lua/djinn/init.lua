@@ -22,23 +22,23 @@ end
 
 function M.setup(opts)
   if vim.fn.has("nvim-0.10") ~= 1 then
-    vim.notify("vim-module: requires Neovim >= 0.10", vim.log.levels.ERROR)
+    vim.notify("djinn.nvim: requires Neovim >= 0.10", vim.log.levels.ERROR)
     return
   end
-  local config = require("vim_module.config").merge(strip_nil(opts or {}))
-  vim.keymap.set({ "n", "i" }, config.keymap, M.trigger, { desc = "vim-module: generate function" })
-  vim.keymap.set({ "n", "i" }, config.fallback_keymap, M.trigger, { desc = "vim-module: generate function (fallback)" })
-  vim.api.nvim_create_user_command("VimModuleCancel", function()
-    require("vim_module.ui").cancel()
-  end, { desc = "vim-module: cancel in-flight generation" })
-  vim.api.nvim_create_user_command("VimModuleCancelAll", function()
-    require("vim_module.ui").cancel_all()
-  end, { desc = "vim-module: cancel running generation and drain the queue" })
+  local config = require("djinn.config").merge(strip_nil(opts or {}))
+  vim.keymap.set({ "n", "i" }, config.keymap, M.trigger, { desc = "djinn.nvim: generate function" })
+  vim.keymap.set({ "n", "i" }, config.fallback_keymap, M.trigger, { desc = "djinn.nvim: generate function (fallback)" })
+  vim.api.nvim_create_user_command("DjinnCancel", function()
+    require("djinn.ui").cancel()
+  end, { desc = "djinn.nvim: cancel in-flight generation" })
+  vim.api.nvim_create_user_command("DjinnCancelAll", function()
+    require("djinn.ui").cancel_all()
+  end, { desc = "djinn.nvim: cancel running generation and drain the queue" })
   M._config = config
 end
 
 function M.trigger()
-  require("vim_module.ui").start(M._config)
+  require("djinn.ui").start(M._config)
 end
 
 return M

@@ -4,7 +4,7 @@
 { self }: { config, lib, pkgs, options, ... }:
 let
   inherit (lib) mkEnableOption mkIf mkAfter mkOption types optionalAttrs;
-  cfg = config.programs.vim-module;
+  cfg = config.programs.djinn;
   plugin = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
   # SAFE Nix->Lua serialization: JSON payload inside a Lua long-bracket string
   # whose bracket level is chosen so the closing delimiter can never occur in
@@ -20,8 +20,8 @@ let
   in go 0;
   br = lib.concatStringsSep "" (lib.genList (_: "=") brLen);
 in {
-  options.programs.vim-module = {
-    enable = mkEnableOption "vim-module AI function generation" // { default = false; };
+  options.programs.djinn = {
+    enable = mkEnableOption "djinn.nvim AI function generation" // { default = false; };
     model = mkOption { type = types.str; default = "claude-haiku-4-5"; description = "Anthropic model id"; };
     keymap = mkOption { type = types.str; default = "<D-f>"; description = "Primary trigger keymap (normal + insert)"; };
     fallback_keymap = mkOption { type = types.str; default = "<leader>af"; description = "Terminal-safe fallback chord"; };
@@ -39,7 +39,7 @@ in {
   config = mkIf cfg.enable (optionalAttrs (options.programs ? shmulvim) {
     programs.shmulvim.extraConfig = mkAfter ''
       vim.opt.runtimepath:prepend("${plugin}")
-      require("vim_module").setup(vim.json.decode([${br}[${setupJson}]${br}]))
+      require("djinn").setup(vim.json.decode([${br}[${setupJson}]${br}]))
     '';
   });
 }

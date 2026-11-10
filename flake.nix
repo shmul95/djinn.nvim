@@ -9,7 +9,7 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         plugin = pkgs.vimUtils.buildVimPlugin {
-          pname = "vim-module";
+          pname = "djinn.nvim";
           version = "0.1.0";
           src = self;   # git-tracked files only; .planning is gitignored -> never in the store
         };

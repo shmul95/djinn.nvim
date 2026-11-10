@@ -421,10 +421,10 @@ end
 
 -- cache ------------------------------------------------------------------
 
--- stdpath("cache") .. "/vim-module/" .. sha256(root) .. ".json" — never
+-- stdpath("cache") .. "/djinn.nvim/" .. sha256(root) .. ".json" — never
 -- inside the repo worktree.
 function M.cache_path(root)
-  return vim.fn.stdpath("cache") .. "/vim-module/" .. vim.fn.sha256(root) .. ".json"
+  return vim.fn.stdpath("cache") .. "/djinn.nvim/" .. vim.fn.sha256(root) .. ".json"
 end
 
 -- WR-05: schema validation — a corrupt or tampered cache must degrade to
@@ -479,7 +479,7 @@ function M.load_cache(root)
 end
 
 function M.save_cache(root, manifest)
-  local dir = vim.fn.stdpath("cache") .. "/vim-module"
+  local dir = vim.fn.stdpath("cache") .. "/djinn.nvim"
   vim.fn.mkdir(dir, "p")
   -- WR-04: 0600 (384) — the cache carries the full project tree and docs
   -- text; it must not be world-readable (same mode as client.write_temp_file

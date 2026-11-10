@@ -2,7 +2,7 @@ local this = debug.getinfo(1, "S").source:sub(2)
 local root = this:match("^(.*)/tests/") or "."
 package.path = root .. "/lua/?.lua;" .. package.path
 
-local sse = require("vim_module.sse")
+local sse = require("djinn.sse")
 
 local cases = {}
 local REQUIRED = {

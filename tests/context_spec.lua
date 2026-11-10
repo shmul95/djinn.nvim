@@ -1,11 +1,11 @@
 local this = debug.getinfo(1, "S").source:sub(2)
 local root = this:match("^(.*)/tests/") or "."
 -- Same bootstrap shape as tests/stream_spec.lua, plus the "?/init.lua" pattern
--- so require("vim_module") resolves lua/vim_module/init.lua (case 1 needs it).
+-- so require("djinn") resolves lua/djinn/init.lua (case 1 needs it).
 package.path = root .. "/lua/?.lua;" .. root .. "/lua/?/init.lua;" .. package.path
 
--- NOTE: no require("vim_module.context") at file scope — case 1 proves that
--- requiring + setup()ing vim_module loads no context machinery. Cases 2-9
+-- NOTE: no require("djinn.context") at file scope — case 1 proves that
+-- requiring + setup()ing djinn loads no context machinery. Cases 2-9
 -- pull the module through ctx() after that case has run.
 
 local cases = {}
@@ -43,10 +43,10 @@ end
 -- helpers ---------------------------------------------------------------
 
 local function ctx()
-  return require("vim_module.context")
+  return require("djinn.context")
 end
 
-local CACHE_DIR = vim.fn.stdpath("cache") .. "/vim-module"
+local CACHE_DIR = vim.fn.stdpath("cache") .. "/djinn.nvim"
 local cache_dir_existed = vim.fn.isdirectory(CACHE_DIR) == 1
 local cleanup_roots = {}
 local fixture_roots = {}
@@ -137,14 +137,14 @@ local function assert_same_set(got, want, label)
 end
 
 -- cases -----------------------------------------------------------------
--- Case 1 MUST run first: it asserts that nothing has loaded vim_module.context.
+-- Case 1 MUST run first: it asserts that nothing has loaded djinn.context.
 
 case("startup_loads_no_context", function()
-  require("vim_module").setup({})
-  assert(package.loaded["vim_module.context"] == nil,
-    "startup_loads_no_context: require+setup of vim_module must not load vim_module.context")
-  assert(package.loaded["vim_module.queue"] == nil,
-    "startup_loads_no_context: require+setup of vim_module must not load vim_module.queue")
+  require("djinn").setup({})
+  assert(package.loaded["djinn.context"] == nil,
+    "startup_loads_no_context: require+setup of djinn must not load djinn.context")
+  assert(package.loaded["djinn.queue"] == nil,
+    "startup_loads_no_context: require+setup of djinn must not load djinn.queue")
 end)
 
 case("denylist_fixture_readme_only", function()
@@ -651,7 +651,7 @@ case("system_prompt_untrusted_framing", function()
   vim.bo[buf].filetype = "lua"
   vim.bo[buf].shiftwidth = 2
   vim.bo[buf].expandtab = true
-  local client = require("vim_module.client")
+  local client = require("djinn.client")
   local frozen = "You write complete, self-contained code units. Output ONLY the code — no prose, no markdown fences, no explanations.\nLanguage: lua\nIndent: spaces, width 2"
   local s0 = client.build_system_prompt(buf)
   assert(s0 == frozen,
@@ -670,7 +670,7 @@ case("system_prompt_continuation_sentence", function()
   vim.bo[buf].filetype = "python"
   vim.bo[buf].shiftwidth = 4
   vim.bo[buf].expandtab = true
-  local client = require("vim_module.client")
+  local client = require("djinn.client")
   local s = client.build_system_prompt(buf, { mode = "continuation" })
   assert(s:find("The user wrote a function header. Output ONLY the body, correctly indented. Never repeat the signature or header line.", 1, true),
     "system_prompt_continuation_sentence: exact continuation sentence must be present")
@@ -773,7 +773,7 @@ case("build_user_content_digest_headroom", function()
   -- ~budget chars of neighborhood text the digest was ALWAYS dropped
   -- (grounding silently vanished). The slice must reserve digest headroom.
   local context = ctx()
-  local client = require("vim_module.client")
+  local client = require("djinn.client")
   local buf = vim.api.nvim_create_buf(false, true)
   local lines = {}
   for i = 1, 300 do
@@ -798,7 +798,7 @@ end)
 -- teardown + runner -----------------------------------------------------
 
 local function teardown()
-  local context = pcall(require, "vim_module.context") and require("vim_module.context") or nil
+  local context = pcall(require, "djinn.context") and require("djinn.context") or nil
   for _, proj in ipairs(fixture_roots) do
     if context then
       pcall(vim.fn.delete, context.cache_path(proj))
@@ -807,7 +807,7 @@ local function teardown()
   for _, base in ipairs(cleanup_roots) do
     pcall(vim.fn.delete, base, "rf")
   end
-  -- The spec created stdpath('cache')/vim-module/ only if it did not exist
+  -- The spec created stdpath('cache')/djinn.nvim/ only if it did not exist
   -- before the run; remove it together with its fixture cache files.
   if not cache_dir_existed then
     if context then

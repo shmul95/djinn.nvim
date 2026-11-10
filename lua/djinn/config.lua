@@ -32,7 +32,7 @@ end
 -- for Phases 2-4).
 function M.merge(opts)
   if opts ~= nil and type(opts) ~= "table" then
-    error("vim_module: setup opts must be a table")
+    error("djinn.nvim: setup opts must be a table")
   end
   local merged = deep_copy(M.defaults)
   if opts == nil then
@@ -47,13 +47,13 @@ function M.merge(opts)
   end
   if opts.budgets ~= nil then
     if type(opts.budgets) ~= "table" then
-      error("vim_module: budgets.context_tokens and budgets.max_output_tokens must be positive integers")
+      error("djinn.nvim: budgets.context_tokens and budgets.max_output_tokens must be positive integers")
     end
     for _, field in ipairs({ "context_tokens", "max_output_tokens" }) do
       local x = opts.budgets[field]
       if x ~= nil then
         if type(x) ~= "number" or x <= 0 or math.floor(x) ~= x then
-          error("vim_module: budgets.context_tokens and budgets.max_output_tokens must be positive integers")
+          error("djinn.nvim: budgets.context_tokens and budgets.max_output_tokens must be positive integers")
         end
         merged.budgets[field] = x
       end
