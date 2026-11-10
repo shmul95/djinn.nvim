@@ -121,9 +121,58 @@ end
 -- counts every entry the walk encounters (cheap staleness signal — the plan's
 -- case "stale_file_count_triggers_refresh" pins it to all fixture entries),
 -- while tree/docs/max_mtime only ever see non-denied files.
+-- WR-08: gitignore semantics at any depth — the root-anchored pattern
+-- translation under-matches (src/ignored.txt leaked with pattern
+-- "ignored.txt"). Inside a git repo the walk defers to `git check-ignore
+-- --stdin` in batches (true git rules: any depth, nested .gitignore,
+-- .git/info/exclude); the translated pattern list is the fallback for
+-- non-repo roots and for a broken/missing git binary.
+local function enqueue_non_ignored(state, entries)
+  if #entries == 0 then
+    return
+  end
+  if not state.git_root then
+    for _, e in ipairs(entries) do
+      state.work[#state.work + 1] = e
+    end
+    return
+  end
+  local paths = {}
+  for i = 1, #entries do
+    paths[i] = entries[i].rel
+  end
+  local out = vim.fn.system({ "git", "-C", state.root, "check-ignore", "--stdin" },
+    table.concat(paths, "\n") .. "\n")
+  local code = vim.v.shell_error
+  if code ~= 0 and code ~= 1 then
+    -- git unavailable/broken (128 = not a repository etc.): degrade to the
+    -- translated pattern list.
+    for _, e in ipairs(entries) do
+      if not M.is_denied(e.rel, state.ignore_pats) then
+        state.work[#state.work + 1] = e
+      end
+    end
+    return
+  end
+  local ignored = {}
+  if code == 0 then
+    -- exit 0 = at least one path ignored; they are echoed on stdout
+    for line in out:gmatch("[^\n]+") do
+      ignored[line] = true
+    end
+  end
+  for _, e in ipairs(entries) do
+    if not ignored[e.rel] then
+      state.work[#state.work + 1] = e
+    end
+  end
+end
+
 local function step(state)
   if state.ignore_pats == nil then
     state.ignore_pats = M.parse_gitignore(state.root)
+    -- WR-08: .git may be a directory (normal repo) or a file (worktree).
+    state.git_root = vim.uv.fs_stat(state.root .. "/.git") ~= nil
   end
   local n = 0
   while n < state.chunk and #state.work > 0 do
@@ -141,6 +190,7 @@ local function step(state)
         handle = vim.uv.fs_scandir(dir_path)
       end
       if handle ~= nil then
+        local pending = {}
         while n < state.chunk do
           local name, typ = vim.uv.fs_scandir_next(handle)
           if name == nil then
@@ -150,17 +200,20 @@ local function step(state)
           n = n + 1
           local rel = item.rel == "" and name or (item.rel .. "/" .. name)
           state.file_count = state.file_count + 1
-          if not M.is_denied(rel, state.ignore_pats) then
-            state.work[#state.work + 1] = { rel = rel, dir = (typ == "directory") }
+          -- name denylist always; gitignore patterns only as fallback when
+          -- NOT in git mode (git check-ignore is the authority — WR-08)
+          if not M.is_denied(rel, state.git_root and nil or state.ignore_pats) then
+            pending[#pending + 1] = { rel = rel, dir = (typ == "directory") }
           end
         end
+        enqueue_non_ignored(state, pending)
         if handle ~= nil then
           table.insert(state.work, 1, { rel = item.rel, dir = true, cursor = handle })
         end
       end
     else
       -- denylist BEFORE read (belt and braces: checked at discovery too)
-      if not M.is_denied(item.rel, state.ignore_pats) then
+      if not M.is_denied(item.rel, state.git_root and nil or state.ignore_pats) then
         local path = state.root .. "/" .. item.rel
         -- CR-02: lstat guard — refuse symlinks entirely. io.open/fs_stat would
         -- follow them: a README.md -> .env (or -> ~/.ssh/id_rsa) symlink puts

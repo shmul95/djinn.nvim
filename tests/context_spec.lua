@@ -24,6 +24,7 @@ local REQUIRED = {
   "gitignore_pattern_parse",
   "walk_chunked_yields",
   "walk_wide_dir_bounded_steps",
+  "gitignore_nested_depth_git_check",
   "pack_fits_no_truncation",
   "pack_digest_truncated_tail_first",
   "pack_request_never_truncated",
@@ -535,6 +536,41 @@ case("walk_wide_dir_bounded_steps", function()
   assert(got and #got.tree == 8,
     "walk_wide_dir_bounded_steps: manifest must list all 8 files, got " ..
     tostring(got and #got.tree))
+end)
+
+case("gitignore_nested_depth_git_check", function()
+  -- WR-08: root-anchored pattern translation under-matches at depth — with
+  -- .gitignore "ignored.txt", src/ignored.txt LEAKED into the tree. Inside a
+  -- git repo the walk must defer to `git check-ignore` (true git semantics:
+  -- any depth, nested .gitignore, .git/info/exclude).
+  local context = ctx()
+  local base = vim.fn.tempname()
+  local proj = base .. "/proj"
+  vim.fn.mkdir(proj .. "/src/build", "p")
+  vim.fn.system({ "git", "init", proj })
+  assert(vim.v.shell_error == 0,
+    "gitignore_nested_depth_git_check: git init failed (git must be on PATH)")
+  write_file(proj .. "/.gitignore", "ignored.txt\nbuild/\n")
+  write_file(proj .. "/README.md", "git-fixture-SENTINEL\n")
+  write_file(proj .. "/src/ignored.txt", "leak-nested-SENTINEL\n")
+  write_file(proj .. "/src/build/out.txt", "leak-build-SENTINEL\n")
+  write_file(proj .. "/src/kept.txt", "kept-SENTINEL\n")
+  cleanup_roots[#cleanup_roots + 1] = base
+  fixture_roots[#fixture_roots + 1] = proj
+
+  local digest = context.render_digest(context.build_sync(proj))
+  assert(digest:find("git-fixture-SENTINEL", 1, true),
+    "gitignore_nested_depth_git_check: README content must land")
+  assert(digest:find("kept.txt", 1, true),
+    "gitignore_nested_depth_git_check: non-ignored nested file must be listed")
+  for _, leak in ipairs({ "leak-nested-SENTINEL", "leak-build-SENTINEL" }) do
+    assert(not digest:find(leak, 1, true),
+      "gitignore_nested_depth_git_check: digest leaks " .. leak)
+  end
+  for _, p in ipairs({ "ignored.txt", "build/" }) do
+    assert(not digest:find(p, 1, true),
+      "gitignore_nested_depth_git_check: digest leaks ignored path " .. p)
+  end
 end)
 
 -- packing (CTX-02) + prompt-assembly cases -------------------------------
