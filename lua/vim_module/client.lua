@@ -301,9 +301,18 @@ function M.generate(opts)
           if #clean > 0 then opts.on_lines(clean) end
         end
       elseif data.type == "message_delta" then
-        if data.delta then
-          state.stop_reason = data.delta.stop_reason
-          state.stop_details = data.delta.stop_details
+        -- CR-01: stream JSON is untrusted (T-05-01) — vim.json.decode maps
+        -- JSON null to vim.NIL (truthy userdata, the init.lua strip_nil trap).
+        -- Only accept typed shapes here: stop_reason is a plain string,
+        -- stop_details a plain table (its explanation field is re-guarded at
+        -- the concat site).
+        if type(data.delta) == "table" then
+          if type(data.delta.stop_reason) == "string" then
+            state.stop_reason = data.delta.stop_reason
+          end
+          if type(data.delta.stop_details) == "table" then
+            state.stop_details = data.delta.stop_details
+          end
         end
         if data.usage then state.usage = data.usage end
       end
@@ -330,56 +339,77 @@ function M.generate(opts)
       local cleanup = function()
         M.cleanup_temp_files({ header_path, body_path, dump_path })
       end
-      if state.cancelled then
-        -- User cancel: flush tail, no error
-        if acc.pending ~= "" then
-          local tail = stripper:filter({ acc.pending })
-          acc.pending = ""
-          if #tail > 0 then opts.on_lines(tail) end
-        end
-        opts.on_complete(nil)
-        cleanup()
-        return
+      -- CR-01: on_exit is the untrusted-decode boundary. A raise here used
+      -- to skip BOTH opts.on_complete() (queue.lua requires "done EXACTLY
+      -- ONCE" with no watchdog — every later generation wedges at "Queued")
+      -- AND cleanup() (the 0600 header temp file carries the API key —
+      -- CFG-02: unlinked promptly). Run the branch block protected, complete
+      -- exactly once (generic failure fallback), and ALWAYS unlink at the
+      -- end. The fallback text is fixed — no untrusted content (T-05-01/06).
+      local completed = false
+      local function complete(err, usage)
+        if completed then return end
+        completed = true
+        opts.on_complete(err, usage)
       end
-      if state.error_msg then
-        opts.on_complete(state.error_msg)
-        cleanup()
-        return
-      end
-      local status = M.parse_status(dump_path)
-      if status and status >= 200 and status < 300 then
-        -- 2xx success: flush tail through fence stripper
-        if acc.pending ~= "" then
-          local tail = stripper:filter({ acc.pending })
-          acc.pending = ""
-          if #tail > 0 then opts.on_lines(tail) end
+      local ok_exit = pcall(function()
+        if state.cancelled then
+          -- User cancel: flush tail, no error
+          if acc.pending ~= "" then
+            local tail = stripper:filter({ acc.pending })
+            acc.pending = ""
+            if #tail > 0 then opts.on_lines(tail) end
+          end
+          complete(nil)
+          return
         end
-        if state.stop_reason == "max_tokens" then
-          opts.on_complete("Generation truncated (max_tokens reached)")
-        elseif state.stop_reason == "refusal" then
-          -- RESEARCH.md: refusal — surface stop_details if present
-          local expl = state.stop_details and state.stop_details.explanation
-          if expl and expl ~= "" then
-            opts.on_complete("Model refused the request: " .. expl)
+        if state.error_msg then
+          complete(state.error_msg)
+          return
+        end
+        local status = M.parse_status(dump_path)
+        if status and status >= 200 and status < 300 then
+          -- 2xx success: flush tail through fence stripper
+          if acc.pending ~= "" then
+            local tail = stripper:filter({ acc.pending })
+            acc.pending = ""
+            if #tail > 0 then opts.on_lines(tail) end
+          end
+          if state.stop_reason == "max_tokens" then
+            complete("Generation truncated (max_tokens reached)")
+          elseif state.stop_reason == "refusal" then
+            -- RESEARCH.md: refusal — surface stop_details if present. CR-01:
+            -- type-guarded — "explanation": null decodes to vim.NIL (truthy
+            -- and ~= "") and the concat below used to raise inside on_exit;
+            -- a non-table stop_details used to raise on the index itself.
+            local expl = type(state.stop_details) == "table" and state.stop_details.explanation
+            if type(expl) == "string" and expl ~= "" then
+              complete("Model refused the request: " .. expl)
+            else
+              complete("Model refused the request")
+            end
           else
-            opts.on_complete("Model refused the request")
+            complete(nil, state.usage)
           end
         else
-          opts.on_complete(nil, state.usage)
-        end
-      else
-        -- Non-2xx: error body is plain JSON (NOT SSE)
-        local err_msg = M.parse_error_body(state.raw_stdout)
-          or ("HTTP " .. tostring(status or out.code))
-        if status == 429 then
-          local retry = M.parse_retry_after(dump_path)
-          if retry then
-            -- 05-CONTEXT/05-RESEARCH locked format: "Rate limited — retry after Ns"
-            -- (em-dash —). NO auto-retry in v1: the user decides (fire-and-forget).
-            err_msg = "Rate limited — retry after " .. retry .. "s"
+          -- Non-2xx: error body is plain JSON (NOT SSE)
+          local err_msg = M.parse_error_body(state.raw_stdout)
+            or ("HTTP " .. tostring(status or out.code))
+          if status == 429 then
+            local retry = M.parse_retry_after(dump_path)
+            if retry then
+              -- 05-CONTEXT/05-RESEARCH locked format: "Rate limited — retry after Ns"
+              -- (em-dash —). NO auto-retry in v1: the user decides (fire-and-forget).
+              err_msg = "Rate limited — retry after " .. retry .. "s"
+            end
           end
+          complete(err_msg)
         end
-        opts.on_complete(err_msg)
+      end)
+      if not ok_exit then
+        -- Safety net: no raise may skip done()/cleanup — degrade to a fixed
+        -- failure (complete() is once-only, so this cannot double-fire).
+        complete("generation failed")
       end
       cleanup()
     end)

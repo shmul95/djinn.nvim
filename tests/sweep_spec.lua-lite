@@ -157,6 +157,9 @@ local function ui_case_begin(opts)
       "ui_case_begin: no captured on_exit (was generate spawned?)")
     captured.on_exit({ code = code or 0, signal = 0 })
   end
+  -- argv exposure for temp-path proofs (temp_paths() shim: accepts any table
+  -- with captured_argv — same contract as with_fake's fake_ctx)
+  env.captured_argv = function() return captured and captured.cmd end
   env.restore = function()
     vim.system = ORIG_SYSTEM
     vim.ui.input = ORIG_INPUT
@@ -439,7 +442,9 @@ case("failure_matrix_500", function()
 end)
 
 -- 8. failure_matrix_malformed_sse (GEN-06): malformed JSON frames are skipped
--- (never garble the buffer); in-stream error events surface as ERROR notify.
+-- (never garble the buffer); in-stream error events surface as ERROR notify;
+-- hostile DECODED shapes (refusal with "explanation": null) must not raise
+-- inside on_exit, must not wedge the queue, and must not leak temp files.
 -- T-05-06: no fixture key in any notify.
 case("failure_matrix_malformed_sse", function()
   local env = ui_case_begin({ input = "write fib", api_key = "sk-sweep-FAKEKEY", dump_headers = "HTTP/2 200\n\n" })
@@ -467,6 +472,55 @@ case("failure_matrix_malformed_sse", function()
   end)
   env.restore()
   if not ok then error(err, 0) end
+
+  -- CR-01 re-prove: refusal with "explanation": null (decodes to vim.NIL —
+  -- truthy userdata). The old concat raised inside on_exit BEFORE
+  -- on_complete()/cleanup(): the queue wedged (every later generation stays
+  -- "Queued") and the key-bearing header temp file leaked (CFG-02). Must NOT
+  -- raise; temps unlinked; done must fire — a second queued job must RUN.
+  local env2 = ui_case_begin({ input = "write fib", api_key = "sk-sweep-FAKEKEY" })
+  local paths2 = temp_paths({ captured_argv = env2.captured_argv })
+  assert_exist(paths2, "failure_matrix_malformed_sse (null explanation)")
+  env2.chunks({
+    'event: message_start\ndata: {"type":"message_start","message":{}}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"explanation":null}}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  })
+  env2.exit(0)  -- a raise here (old code) aborts the case -> RED
+  vim.wait(1000, function() return #env2.notify_log > 0 end)
+  vim.wait(50)  -- settle: the exactly-one assertion must not race a second notify
+  local ok2, err2 = pcall(function()
+    assert(#env2.notify_log == 1,
+      "failure_matrix_malformed_sse (null explanation): want exactly 1 notify, got " .. #env2.notify_log)
+    assert(env2.notify_log[1].level == vim.log.levels.ERROR,
+      "failure_matrix_malformed_sse (null explanation): want ERROR level, got " .. tostring(env2.notify_log[1].level))
+    assert(env2.notify_log[1].msg:find("Model refused the request", 1, true),
+      "failure_matrix_malformed_sse (null explanation): fallback refusal message must surface, got " .. tostring(env2.notify_log[1].msg))
+    assert(not env2.notify_log[1].msg:find("Model refused the request:", 1, true),
+      "failure_matrix_malformed_sse (null explanation): null explanation must not be appended, got " .. tostring(env2.notify_log[1].msg))
+  end)
+  if not ok2 then env2.restore() error(err2, 0) end
+  -- queue-not-wedged: done() must have fired — a SECOND queued job must run.
+  env2.ui.start(env2.config)
+  vim.wait(1000, function() return env2.system_calls >= 2 end)
+  local ok3, err3 = pcall(function()
+    assert(env2.system_calls == 2,
+      "failure_matrix_malformed_sse (null explanation): queue wedged — second job never spawned (done() did not fire)")
+  end)
+  if not ok3 then env2.restore() error(err3, 0) end
+  local paths3 = temp_paths({ captured_argv = env2.captured_argv })
+  env2.chunks({
+    'event: message_start\ndata: {"type":"message_start","message":{}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  })
+  env2.exit(0)
+  vim.wait(50)
+  local ok4, err4 = pcall(function()
+    assert_cleaned(paths2, "failure_matrix_malformed_sse (null explanation)")
+    assert_cleaned(paths3, "failure_matrix_malformed_sse (null explanation, job 2)")
+  end)
+  env2.restore()
+  if not ok4 then error(err4, 0) end
 end)
 
 -- 9. failure_matrix_network_down (GEN-06): curl exit 7 (failed to connect) with
