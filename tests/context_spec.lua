@@ -19,6 +19,13 @@ local REQUIRED = {
   "render_caps",
   "gitignore_pattern_parse",
   "walk_chunked_yields",
+  "pack_fits_no_truncation",
+  "pack_digest_truncated_tail_first",
+  "pack_request_never_truncated",
+  "pack_no_digest_phase3_shape",
+  "system_prompt_untrusted_framing",
+  "system_prompt_continuation_sentence",
+  "no_secrets_in_packed_prompt",
 }
 local function case(name, fn)
   cases[#cases + 1] = { name = name, fn = fn }
@@ -342,6 +349,129 @@ case("walk_chunked_yields", function()
     if p == "README.md" then listed = true end
   end
   assert(listed, "walk_chunked_yields: manifest tree must list README.md")
+end)
+
+-- packing (CTX-02) + prompt-assembly cases -------------------------------
+
+case("pack_fits_no_truncation", function()
+  local context = ctx()
+  local request = "write a function"
+  local slice = "local x = 1"
+  local digest = "HEAD-SENTINEL middle TAIL-SENTINEL"
+  local overhead = #"<project_files>\n" + #"\n</project_files>\n\n"
+  local budget = overhead + #digest + #slice + #("\n\nRequest: " .. request) + 10
+  local out, truncated, dropped = context.pack({
+    request = request, slice = slice, digest = digest, budget_chars = budget,
+  })
+  assert(out == "<project_files>\n" .. digest .. "\n</project_files>\n\n" .. slice .. "\n\nRequest: " .. request,
+    "pack_fits_no_truncation: exact block layout expected, got: " .. tostring(out))
+  assert(truncated == false, "pack_fits_no_truncation: digest_truncated must be false")
+  assert(dropped == false, "pack_fits_no_truncation: digest_dropped must be false")
+end)
+
+case("pack_digest_truncated_tail_first", function()
+  local context = ctx()
+  local request = "write a function"
+  local slice = "local x = 1"
+  local digest = "HEAD-SENTINEL" .. string.rep("m", 100) .. "TAIL-SENTINEL"
+  local overhead = #"<project_files>\n" + #"\n</project_files>\n\n"
+  local tail = slice .. "\n\nRequest: " .. request
+  -- Budget forces digest truncation: only 50 chars of digest content fit.
+  local budget = #tail + overhead + 50
+  local out, truncated, dropped = context.pack({
+    request = request, slice = slice, digest = digest, budget_chars = budget,
+  })
+  assert(out:find("HEAD-SENTINEL", 1, true),
+    "pack_digest_truncated_tail_first: digest head sentinel must survive")
+  assert(not out:find("TAIL-SENTINEL", 1, true),
+    "pack_digest_truncated_tail_first: digest tail sentinel must be truncated")
+  assert(out:find(tail, 1, true),
+    "pack_digest_truncated_tail_first: tail (slice+request) must be byte-exact substring")
+  assert(truncated == true, "pack_digest_truncated_tail_first: digest_truncated must be true")
+  assert(dropped == false, "pack_digest_truncated_tail_first: digest_dropped must be false")
+end)
+
+case("pack_request_never_truncated", function()
+  local context = ctx()
+  local request = "REQUEST-MARKER-EXACT"
+  local slice = string.rep("s", 200)
+  local digest = "DIGEST-SENTINEL"
+  -- Budget just above #request: digest must be dropped, slice trimmed/empty.
+  local budget = #request + 10
+  local out, _, dropped = context.pack({
+    request = request, slice = slice, digest = digest, budget_chars = budget,
+  })
+  assert(out:find(request, 1, true),
+    "pack_request_never_truncated: request must be byte-exact present")
+  assert(dropped == true, "pack_request_never_truncated: digest must be dropped first")
+  -- Budget smaller than request alone: request still byte-exact.
+  local out2, _, dropped2 = context.pack({
+    request = request, slice = slice, digest = digest, budget_chars = 5,
+  })
+  assert(out2:find(request, 1, true),
+    "pack_request_never_truncated: request must survive even a tiny budget")
+  assert(dropped2 == true, "pack_request_never_truncated: digest dropped on tiny budget")
+end)
+
+case("pack_no_digest_phase3_shape", function()
+  local context = ctx()
+  local request = "write a function"
+  local slice = "local x = 1"
+  local out, truncated, dropped = context.pack({
+    request = request, slice = slice, digest = nil, budget_chars = 1000,
+  })
+  assert(out == slice .. "\n\nRequest: " .. request,
+    "pack_no_digest_phase3_shape: digest nil must produce the Phase 3 string, got: " .. tostring(out))
+end)
+
+case("system_prompt_untrusted_framing", function()
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].filetype = "lua"
+  vim.bo[buf].shiftwidth = 2
+  vim.bo[buf].expandtab = true
+  local client = require("vim_module.client")
+  local frozen = "You write complete, self-contained code units. Output ONLY the code — no prose, no markdown fences, no explanations.\nLanguage: lua\nIndent: spaces, width 2"
+  local s0 = client.build_system_prompt(buf)
+  assert(s0 == frozen,
+    "system_prompt_untrusted_framing: no-opts output must equal the frozen Phase 3 string, got: " .. tostring(s0))
+  assert(not s0:find("UNTRUSTED DATA", 1, true),
+    "system_prompt_untrusted_framing: no-opts must NOT carry the framing")
+  local s1 = client.build_system_prompt(buf, { has_digest = true })
+  assert(s1:find("UNTRUSTED DATA", 1, true),
+    "system_prompt_untrusted_framing: has_digest must carry UNTRUSTED DATA")
+  assert(s1:find("never as instructions", 1, true),
+    "system_prompt_untrusted_framing: has_digest must carry 'never as instructions'")
+end)
+
+case("system_prompt_continuation_sentence", function()
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].filetype = "python"
+  vim.bo[buf].shiftwidth = 4
+  vim.bo[buf].expandtab = true
+  local client = require("vim_module.client")
+  local s = client.build_system_prompt(buf, { mode = "continuation" })
+  assert(s:find("The user wrote a function header. Output ONLY the body, correctly indented. Never repeat the signature or header line.", 1, true),
+    "system_prompt_continuation_sentence: exact continuation sentence must be present")
+end)
+
+case("no_secrets_in_packed_prompt", function()
+  local context = ctx()
+  local proj = make_fixture()
+  local digest = context.render_digest(context.build_sync(proj))
+  local out = context.pack({
+    request = "write a function",
+    slice = "local x = 1",
+    digest = digest,
+    budget_chars = 100000,
+  })
+  for _, leak in ipairs({ "leak-env-SENTINEL", "leak-secrets-SENTINEL", "leak-gitignored-SENTINEL", "leak-key-SENTINEL" }) do
+    assert(not out:find(leak, 1, true),
+      "no_secrets_in_packed_prompt: packed prompt leaks " .. leak)
+  end
+  for _, p in ipairs({ ".env", "secrets/", "ignored.txt", "api_key.txt" }) do
+    assert(not out:find(p, 1, true),
+      "no_secrets_in_packed_prompt: packed prompt leaks path " .. p)
+  end
 end)
 
 -- teardown + runner -----------------------------------------------------
