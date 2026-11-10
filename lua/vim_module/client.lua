@@ -48,9 +48,19 @@ end
 
 function M.write_temp_file(content)
   local path = vim.fn.tempname()
-  local fd = vim.uv.fs_open(path, "w", 384)  -- 384 = 0600 octal
-  vim.uv.fs_write(fd, content)
-  vim.uv.fs_close(fd)
+  local fd, open_err = vim.uv.fs_open(path, "w", 384)  -- 384 = 0600 octal
+  if not fd then
+    error("vim-module: cannot create temp file: " .. tostring(open_err))
+  end
+  -- pcall: fs_write can raise on a bad fd, and its nil,err return must also
+  -- count as failure. On ANY failure the just-created file is unlinked before
+  -- raising — it may be the key-bearing header file (CFG-02).
+  local ok, ret, write_err = pcall(vim.uv.fs_write, fd, content)
+  pcall(vim.uv.fs_close, fd)
+  if not ok or not ret then
+    pcall(vim.uv.fs_unlink, path)
+    error("vim-module: cannot write temp file: " .. tostring(write_err or ret))
+  end
   return path
 end
 
@@ -217,15 +227,8 @@ function M.generate(opts)
     user_content = user_content,
   })
 
-  -- Write temp files
-  local header_path = M.write_temp_file(M.build_headers(api_key))
-  local body_path = M.write_temp_file(body)
-  local dump_path = vim.fn.tempname()
-
-  -- Build argv
-  local argv = M.build_curl_args(curl_bin, header_path, body_path, dump_path)
-
-  -- State
+  -- State (hoisted above the protected spawn segment so the cancel handle
+  -- below can reach it)
   local state = {
     raw_stdout = "",
     stop_reason = nil,
@@ -237,102 +240,125 @@ function M.generate(opts)
   local acc = { pending = "" }
   local stripper = M.new_fence_stripper()
 
-  -- SSE parser (require at call time)
-  local sse = require("vim_module.sse")
-  local parser = sse.new(function(event_name, data_str)
-    if event_name == "ping" then return end
-    local ok, data = pcall(vim.json.decode, data_str)
-    if not ok or type(data) ~= "table" then return end
-    if data.type == "error" or event_name == "error" then
-      state.error_msg = (data.error and data.error.message) or "Unknown API error"
-      return
-    end
-    if data.type == "content_block_delta" and data.delta and data.delta.type == "text_delta" then
-      local text = data.delta.text
-      if text and #text > 0 then
-        local complete = require("vim_module.stream").accumulate(acc, text)
-        local clean = stripper:filter(complete)
-        if #clean > 0 then opts.on_lines(clean) end
-      end
-    elseif data.type == "message_delta" then
-      if data.delta then
-        state.stop_reason = data.delta.stop_reason
-        state.stop_details = data.delta.stop_details
-      end
-      -- data.usage.output_tokens captured for Phase 5 telemetry (no-op for now)
-    end
-    -- message_start, content_block_start, content_block_stop, message_stop: lifecycle no-ops
-  end)
+  -- Write temp files and spawn inside a protected segment. Every written
+  -- path is tracked: a synchronous failure between the first write and the
+  -- spawn unlinks them all — the header file carries the API key (CFG-02:
+  -- never on disk beyond the temp file, unlinked promptly).
+  local written = {}
+  local ok_spawn, system_obj = pcall(function()
+    local header_path = M.write_temp_file(M.build_headers(api_key))
+    written[#written + 1] = header_path
+    local body_path = M.write_temp_file(body)
+    written[#written + 1] = body_path
+    local dump_path = vim.fn.tempname()
+    written[#written + 1] = dump_path
 
-  -- Spawn curl (call vim.system as the global — never cache it in a module-local — so tests can replace it)
-  local function stdout_handler(err, data)
-    if data then
-      state.raw_stdout = (state.raw_stdout .. data)
-      if #state.raw_stdout > RAW_CAP then
-        state.raw_stdout = state.raw_stdout:sub(-RAW_CAP)
+    -- Build argv
+    local argv = M.build_curl_args(curl_bin, header_path, body_path, dump_path)
+
+    -- SSE parser (require at call time)
+    local sse = require("vim_module.sse")
+    local parser = sse.new(function(event_name, data_str)
+      if event_name == "ping" then return end
+      local ok, data = pcall(vim.json.decode, data_str)
+      if not ok or type(data) ~= "table" then return end
+      if data.type == "error" or event_name == "error" then
+        state.error_msg = (data.error and data.error.message) or "Unknown API error"
+        return
       end
-      sse.feed(parser, data)
-    end
-  end
-  -- on_exit is the THIRD positional arg (fun(out: vim.SystemCompleted)) —
-  -- opts.on_exit / opts.on_stdout are not vim.system fields and are
-  -- silently ignored by vim.system.
-  local system_obj = vim.system(argv, {
-    stdout = stdout_handler,
-  }, function(out)
-    sse.finish(parser)
-    local cleanup = function()
-      M.cleanup_temp_files({ header_path, body_path, dump_path })
-    end
-    if state.cancelled then
-      -- User cancel: flush tail, no error
-      if acc.pending ~= "" then
-        local tail = stripper:filter({ acc.pending })
-        acc.pending = ""
-        if #tail > 0 then opts.on_lines(tail) end
+      if data.type == "content_block_delta" and data.delta and data.delta.type == "text_delta" then
+        local text = data.delta.text
+        if text and #text > 0 then
+          local complete = require("vim_module.stream").accumulate(acc, text)
+          local clean = stripper:filter(complete)
+          if #clean > 0 then opts.on_lines(clean) end
+        end
+      elseif data.type == "message_delta" then
+        if data.delta then
+          state.stop_reason = data.delta.stop_reason
+          state.stop_details = data.delta.stop_details
+        end
+        -- data.usage.output_tokens captured for Phase 5 telemetry (no-op for now)
       end
-      opts.on_complete(nil)
-      cleanup()
-      return
-    end
-    if state.error_msg then
-      opts.on_complete(state.error_msg)
-      cleanup()
-      return
-    end
-    local status = M.parse_status(dump_path)
-    if status and status >= 200 and status < 300 then
-      -- 2xx success: flush tail through fence stripper
-      if acc.pending ~= "" then
-        local tail = stripper:filter({ acc.pending })
-        acc.pending = ""
-        if #tail > 0 then opts.on_lines(tail) end
+      -- message_start, content_block_start, content_block_stop, message_stop: lifecycle no-ops
+    end)
+
+    -- Spawn curl (call vim.system as the global — never cache it in a module-local — so tests can replace it)
+    local function stdout_handler(err, data)
+      if data then
+        state.raw_stdout = (state.raw_stdout .. data)
+        if #state.raw_stdout > RAW_CAP then
+          state.raw_stdout = state.raw_stdout:sub(-RAW_CAP)
+        end
+        sse.feed(parser, data)
       end
-      if state.stop_reason == "max_tokens" then
-        opts.on_complete("Generation truncated (max_tokens reached)")
-      elseif state.stop_reason == "refusal" then
-        -- RESEARCH.md: refusal — surface stop_details if present
-        local expl = state.stop_details and state.stop_details.explanation
-        if expl and expl ~= "" then
-          opts.on_complete("Model refused the request: " .. expl)
+    end
+    -- on_exit is the THIRD positional arg (fun(out: vim.SystemCompleted)) —
+    -- opts.on_exit / opts.on_stdout are not vim.system fields and are
+    -- silently ignored by vim.system.
+    return vim.system(argv, {
+      stdout = stdout_handler,
+    }, function(out)
+      sse.finish(parser)
+      local cleanup = function()
+        M.cleanup_temp_files({ header_path, body_path, dump_path })
+      end
+      if state.cancelled then
+        -- User cancel: flush tail, no error
+        if acc.pending ~= "" then
+          local tail = stripper:filter({ acc.pending })
+          acc.pending = ""
+          if #tail > 0 then opts.on_lines(tail) end
+        end
+        opts.on_complete(nil)
+        cleanup()
+        return
+      end
+      if state.error_msg then
+        opts.on_complete(state.error_msg)
+        cleanup()
+        return
+      end
+      local status = M.parse_status(dump_path)
+      if status and status >= 200 and status < 300 then
+        -- 2xx success: flush tail through fence stripper
+        if acc.pending ~= "" then
+          local tail = stripper:filter({ acc.pending })
+          acc.pending = ""
+          if #tail > 0 then opts.on_lines(tail) end
+        end
+        if state.stop_reason == "max_tokens" then
+          opts.on_complete("Generation truncated (max_tokens reached)")
+        elseif state.stop_reason == "refusal" then
+          -- RESEARCH.md: refusal — surface stop_details if present
+          local expl = state.stop_details and state.stop_details.explanation
+          if expl and expl ~= "" then
+            opts.on_complete("Model refused the request: " .. expl)
+          else
+            opts.on_complete("Model refused the request")
+          end
         else
-          opts.on_complete("Model refused the request")
+          opts.on_complete(nil)
         end
       else
-        opts.on_complete(nil)
+        -- Non-2xx: error body is plain JSON (NOT SSE)
+        local err_msg = M.parse_error_body(state.raw_stdout)
+          or ("HTTP " .. tostring(status or out.code))
+        if status == 429 then
+          local retry = M.parse_retry_after(dump_path)
+          if retry then err_msg = err_msg .. " (retry after " .. retry .. "s)" end
+        end
+        opts.on_complete(err_msg)
       end
-    else
-      -- Non-2xx: error body is plain JSON (NOT SSE)
-      local err_msg = M.parse_error_body(state.raw_stdout)
-        or ("HTTP " .. tostring(status or out.code))
-      if status == 429 then
-        local retry = M.parse_retry_after(dump_path)
-        if retry then err_msg = err_msg .. " (retry after " .. retry .. "s)" end
-      end
-      opts.on_complete(err_msg)
-    end
-    cleanup()
+      cleanup()
+    end)
   end)
+  if not ok_spawn then
+    -- Synchronous failure (temp write, spawn throw): unlink everything
+    -- written so far, then re-raise for the caller (ui.lua wraps us in pcall).
+    M.cleanup_temp_files(written)
+    error(system_obj, 0)
+  end
 
   return {
     cancel = function()
