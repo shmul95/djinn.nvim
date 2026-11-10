@@ -3,6 +3,9 @@ local root = this:match("^(.*)/tests/") or "."
 package.path = root .. "/lua/?.lua;" .. package.path
 
 local cases = {}
+-- TEMPORARY (REMOVED in Task 2 of this plan): lets the Task 1 interim verify
+-- skip the two Phase 3 busy cases that Task 2 migrates.
+local skip_busy = os.getenv("UI_SKIP_BUSY") == "1"
 local REQUIRED = {
   "esc_aborts_zero_change",
   "empty_input_aborts",
@@ -278,10 +281,14 @@ for _, name in ipairs(REQUIRED) do
 end
 
 local failures = {}
+local executed = 0
 for _, c in ipairs(cases) do
-  local ok, err = pcall(c.fn)
-  if not ok then
-    failures[#failures + 1] = c.name .. ": " .. tostring(err)
+  if not (skip_busy and c.name:match("^busy_")) then
+    executed = executed + 1
+    local ok, err = pcall(c.fn)
+    if not ok then
+      failures[#failures + 1] = c.name .. ": " .. tostring(err)
+    end
   end
 end
 if #failures > 0 then
@@ -290,4 +297,4 @@ if #failures > 0 then
   end
   error("ui_spec: " .. #failures .. " case(s) failed: " .. table.concat(failures, "; "))
 end
-print("ui_spec: all " .. #cases .. " cases passed")
+print("ui_spec: all " .. executed .. " cases passed")

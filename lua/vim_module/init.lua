@@ -31,6 +31,9 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("VimModuleCancel", function()
     require("vim_module.ui").cancel()
   end, { desc = "vim-module: cancel in-flight generation" })
+  vim.api.nvim_create_user_command("VimModuleCancelAll", function()
+    require("vim_module.ui").cancel_all()
+  end, { desc = "vim-module: cancel running generation and drain the queue" })
   M._config = config
 end
 
