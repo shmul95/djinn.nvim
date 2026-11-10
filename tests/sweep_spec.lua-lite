@@ -9,6 +9,7 @@ local cases = {}
 local REQUIRED = {
   "telemetry_completion_notify",
   "telemetry_absent_noop",
+  "failure_matrix_429",
 }
 local function case(name, fn)
   cases[#cases + 1] = { name = name, fn = fn }
@@ -215,6 +216,76 @@ case("telemetry_absent_noop", function()
   assert(#env.notify_log == 0,
     "telemetry_absent_noop: success stays silent without usage — want 0 notifies, got " .. #env.notify_log)
   env.restore()
+end)
+
+-- 3. failure_matrix_429 (GEN-06 recovery path): 429 + retry-after header ->
+-- ERROR notify with the locked recovery text; exactly ONE spawn (no auto-
+-- retry — fire-and-forget, the user decides).
+case("failure_matrix_429", function()
+  local env = ui_case_begin({
+    input = "write fib",
+    api_key = "sk-sweep-FAKEKEY",
+    dump_headers = "HTTP/2 429\nretry-after: 30\n\n",  -- threaded at construction
+  })
+  env.chunks({ [[{"type":"error","error":{"type":"rate_limit_error","message":"Rate limited"}}]] })
+  env.exit(22)
+  -- the failure notify is vim.scheduled — pump before asserting
+  vim.wait(1000, function() return #env.notify_log > 0 end)
+  vim.wait(50)  -- settle: the exactly-one assertion must not race a second notify
+  assert(#env.notify_log == 1,
+    "failure_matrix_429: want exactly 1 notify, got " .. #env.notify_log)
+  assert(env.notify_log[1].level == vim.log.levels.ERROR,
+    "failure_matrix_429: want ERROR level, got " .. tostring(env.notify_log[1].level))
+  assert(env.notify_log[1].msg:find("Rate limited — retry after 30s", 1, true),
+    "failure_matrix_429: msg must contain 'Rate limited — retry after 30s', got " .. tostring(env.notify_log[1].msg))
+  assert(env.system_calls == 1,
+    "failure_matrix_429: no auto-retry — want 1 spawn, got " .. env.system_calls)
+  env.restore()
+end)
+
+-- 4. failure_matrix_429_no_retry_header: 429 WITHOUT a retry-after header
+-- keeps the unchanged fallback — the API message (or "HTTP 429" when the body
+-- carried none) surfaces, and no retry text is invented.
+case("failure_matrix_429_no_retry_header", function()
+  local env = ui_case_begin({
+    input = "write fib",
+    api_key = "sk-sweep-FAKEKEY",
+    dump_headers = "HTTP/2 429\n\n",  -- no retry-after header
+  })
+  env.chunks({ [[{"type":"error","error":{"type":"rate_limit_error","message":"Rate limited"}}]] })
+  env.exit(22)
+  -- the failure notify is vim.scheduled — pump before asserting
+  vim.wait(1000, function() return #env.notify_log > 0 end)
+  vim.wait(50)  -- settle: the exactly-one assertion must not race a second notify
+  assert(#env.notify_log == 1,
+    "failure_matrix_429_no_retry_header: want exactly 1 notify, got " .. #env.notify_log)
+  assert(env.notify_log[1].level == vim.log.levels.ERROR,
+    "failure_matrix_429_no_retry_header: want ERROR level, got " .. tostring(env.notify_log[1].level))
+  assert(env.notify_log[1].msg:find("Rate limited", 1, true),
+    "failure_matrix_429_no_retry_header: API message must surface, got " .. tostring(env.notify_log[1].msg))
+  assert(not env.notify_log[1].msg:find("retry after", 1, true),
+    "failure_matrix_429_no_retry_header: no retry-after header -> no retry text, got " .. tostring(env.notify_log[1].msg))
+  assert(env.system_calls == 1,
+    "failure_matrix_429_no_retry_header: no auto-retry — want 1 spawn, got " .. env.system_calls)
+  env.restore()
+
+  -- body carried no message: fallback surfaces "HTTP 429"
+  local env2 = ui_case_begin({
+    input = "write fib",
+    api_key = "sk-sweep-FAKEKEY",
+    dump_headers = "HTTP/2 429\n\n",
+  })
+  env2.chunks({ [[not json at all]] })
+  env2.exit(22)
+  vim.wait(1000, function() return #env2.notify_log > 0 end)
+  vim.wait(50)  -- settle: the exactly-one assertion must not race a second notify
+  assert(#env2.notify_log == 1,
+    "failure_matrix_429_no_retry_header (HTTP fallback): want exactly 1 notify, got " .. #env2.notify_log)
+  assert(env2.notify_log[1].msg:find("HTTP 429", 1, true),
+    "failure_matrix_429_no_retry_header: body-less 429 must surface 'HTTP 429', got " .. tostring(env2.notify_log[1].msg))
+  assert(not env2.notify_log[1].msg:find("retry after", 1, true),
+    "failure_matrix_429_no_retry_header (HTTP fallback): no retry text without a header, got " .. tostring(env2.notify_log[1].msg))
+  env2.restore()
 end)
 
 -- REQUIRED case enforcement
