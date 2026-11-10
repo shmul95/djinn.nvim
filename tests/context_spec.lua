@@ -30,6 +30,7 @@ local REQUIRED = {
   "system_prompt_continuation_sentence",
   "no_secrets_in_packed_prompt",
   "framing_close_tag_neutralized",
+  "utf8_truncation_char_boundary",
 }
 local function case(name, fn)
   cases[#cases + 1] = { name = name, fn = fn }
@@ -590,6 +591,41 @@ case("framing_close_tag_neutralized", function()
     request = "REQ-MARKER", slice = "local x = 1", digest = digest, budget_chars = 100000,
   })
   assert_unbreakable(out2, "framing_close_tag_neutralized (fixture)")
+end)
+
+case("utf8_truncation_char_boundary", function()
+  -- WR-07: byte-wise truncation cuts mid-UTF-8-character — the request body
+  -- would ship invalid UTF-8. All three cut sites must land on a character
+  -- boundary.
+  local context = ctx()
+  local cjk = string.rep("漢", 100)  -- 3 bytes per character (300 total)
+  -- exact multi-byte fit passes through whole
+  assert(context.utf8_safe_sub(cjk, 9) == string.rep("漢", 3),
+    "utf8_truncation_char_boundary: exact char-boundary fit must pass through")
+  assert(context.utf8_safe_sub("hello", 5) == "hello",
+    "utf8_truncation_char_boundary: exact ASCII fit must pass through")
+  assert(context.utf8_safe_sub("hello", 3) == "hel",
+    "utf8_truncation_char_boundary: ASCII cut is unchanged")
+  -- cut inside a character must back off to the previous boundary
+  local s = context.utf8_safe_sub(cjk, 100)  -- byte 100 is a lead byte of an incomplete char
+  assert(#s > 0 and #s <= 100 and #s % 3 == 0,
+    "utf8_truncation_char_boundary: mid-char cut must back off to a char boundary, got " .. #s .. " bytes")
+  -- pack digest truncation with CJK content
+  local digest = "H" .. cjk
+  local tail = "s\n\nRequest: r"
+  local budget = #tail + 32 + 1 + 40  -- force digest truncation
+  local out = context.pack({ request = "r", slice = "s", digest = digest, budget_chars = budget })
+  local body = out:match("^<project_files>\n(.*)\n</project_files>\n\n")
+  assert(body ~= nil, "utf8_truncation_char_boundary: packed project_files block must be present")
+  assert(#body > 1 and (#body - 1) % 3 == 0,
+    "utf8_truncation_char_boundary: packed digest must end on a char boundary, got " .. #body .. " bytes")
+  -- render docs cap with a multi-byte doc larger than DOCS_CAP
+  local big = string.rep("字", 70000)  -- 210000 bytes > 200KB cap
+  local out2 = context.render_digest({ tree = {}, docs = { { path = "a", text = big } } })
+  local dsection = out2:match("<project_docs>\n(.*)\n</project_docs>")
+  assert(dsection, "utf8_truncation_char_boundary: docs section missing")
+  assert(#dsection > 0 and #dsection <= 200 * 1024 and #dsection % 3 == 0,
+    "utf8_truncation_char_boundary: docs cap must cut on a char boundary, got " .. #dsection .. " bytes")
 end)
 
 -- teardown + runner -----------------------------------------------------

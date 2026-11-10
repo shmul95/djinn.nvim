@@ -212,6 +212,36 @@ end
 
 -- render -----------------------------------------------------------------
 
+-- WR-07: byte-wise string.sub cuts mid-UTF-8-character — a CJK digest
+-- truncated by pack ends on a lead/continuation byte and the request body
+-- ships invalid UTF-8. Truncate on a CHARACTER boundary: back off continuation
+-- bytes to the lead, and drop the lead too when its character is incomplete.
+function M.utf8_safe_sub(s, n)
+  if n <= 0 then
+    return ""
+  end
+  if #s <= n then
+    return s
+  end
+  local cut = n
+  while cut > 0 do
+    local b = s:byte(cut)
+    if b < 128 then
+      return s:sub(1, cut)  -- ASCII character, complete
+    elseif b < 192 then
+      cut = cut - 1         -- continuation byte: back toward the lead
+    else
+      -- lead byte at cut: its character is complete only if it ends at n
+      local len = b < 224 and 2 or (b < 240 and 3 or 4)
+      if cut + len - 1 == n then
+        return s:sub(1, n)
+      end
+      return s:sub(1, cut - 1)  -- incomplete character: drop it whole
+    end
+  end
+  return ""
+end
+
 -- Pure. Digest string:
 --   "<project_tree>\n" .. first min(#tree, 2000) relpaths joined "\n"
 --     .. "\n</project_tree>\n\n"
@@ -230,7 +260,7 @@ function M.render_digest(manifest)
   for _, doc in ipairs(manifest.docs or {}) do
     local text = doc.text or ""
     if used + #text > DOCS_CAP then
-      acc[#acc + 1] = text:sub(1, DOCS_CAP - used)
+      acc[#acc + 1] = M.utf8_safe_sub(text, DOCS_CAP - used)
       used = DOCS_CAP
       break
     end
@@ -279,7 +309,7 @@ function M.pack(opts)
     if #digest + DIGEST_OVERHEAD <= avail then
       -- full digest fits
     elseif avail - DIGEST_OVERHEAD > 0 then
-      digest = digest:sub(1, avail - DIGEST_OVERHEAD)
+      digest = M.utf8_safe_sub(digest, avail - DIGEST_OVERHEAD)
       digest_truncated = true
     else
       digest = nil
@@ -299,7 +329,7 @@ function M.pack(opts)
     local req_part = REQUEST_PREFIX .. request
     local max_slice = budget - #req_part
     if max_slice < 0 then max_slice = 0 end
-    slice = slice:sub(1, max_slice)
+    slice = M.utf8_safe_sub(slice, max_slice)
     user_content = slice .. req_part
   end
 
