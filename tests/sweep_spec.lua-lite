@@ -1,0 +1,242 @@
+-- tests/sweep_spec.lua-lite — executable "Looks Done But Isn't" checklist (Phase 5 release gate)
+
+local this = debug.getinfo(1, "S").source:sub(2)
+local root = this:match("^(.*)/tests/") or "."
+package.path = root .. "/lua/?.lua;" .. package.path
+
+local cases = {}
+-- Plan 01 seeds the list; Plan 03 extends it with the remaining checklist rows.
+local REQUIRED = {
+  "telemetry_completion_notify",
+  "telemetry_absent_noop",
+}
+local function case(name, fn)
+  cases[#cases + 1] = { name = name, fn = fn }
+end
+
+-- True originals, captured at module load so env.restore() is idempotent
+-- (a case that fails before restore must not leak its stub into the next).
+local ORIG_SYSTEM = vim.system
+local ORIG_INPUT = vim.ui.input
+local ORIG_NOTIFY = vim.notify
+
+-- Verbatim copy of tests/client_spec.lua lines 36-78 (with_fake contract:
+-- vim.system(cmd, opts, on_exit) with on_exit as THIRD positional arg; opts
+-- carries stdout/stderr callbacks; script.dump_headers is written to the
+-- captured --dump-header path at spawn time). Kept untouched for Plan 03's
+-- client-level cases; all case input flows through ui_case_begin opts.
+local function with_fake(script, fn)
+  script = script or {}
+  local captured
+  local killed = false
+  local orig = vim.system
+  vim.system = function(cmd, opts, on_exit)
+    captured = { cmd = cmd, opts = opts, on_exit = on_exit }
+    -- Real curl writes --dump-header during the transfer, before exit.
+    if script.dump_headers then
+      local dp
+      for i, v in ipairs(cmd) do
+        if v == "--dump-header" then dp = cmd[i + 1] end
+      end
+      if dp then
+        local df = io.open(dp, "w")
+        if df then df:write(script.dump_headers) df:close() end
+      end
+    end
+    return {
+      pid = 1,
+      kill = function() killed = true end,
+      wait = function() return 0 end,
+    }
+  end
+  local fake_ctx = {
+    captured_argv = function() return captured and captured.cmd end,
+    captured_opts = function() return captured and captured.opts end,
+    killed = function() return killed end,
+    fire_stdout = function(chunk)
+      if captured and captured.opts and captured.opts.stdout then
+        captured.opts.stdout(nil, chunk)
+      end
+    end,
+    fire_exit = function(code, signal)
+      assert(type(captured and captured.on_exit) == "function",
+        "fake: vim.system was called WITHOUT the third positional on_exit")
+      captured.on_exit({ code = code or script.exit_code or 0, signal = signal or 0 })
+    end,
+  }
+  local ok, err = pcall(fn, fake_ctx)
+  vim.system = orig
+  if not ok then error(err) end
+end
+
+-- ui_case_begin(opts) -> env — the UI-level end-to-end driver (REAL client
+-- under the fake; the client is NEVER stubbed via package.loaded).
+-- opts = { input = string|nil, api_key = string|false, dump_headers = string|nil }
+--
+-- opts.dump_headers is threaded into the fake's script table AT CONSTRUCTION
+-- (deliberate CONTRACT FIX / extension — not a harness redesign): default
+-- "HTTP/2 200\n\n" when nil; an explicit "" means NO dump file is written.
+-- Post-spawn env assignment of dump content is FORBIDDEN — it would land after
+-- the fake already wrote (or skipped) the dump.
+local function ui_case_begin(opts)
+  opts = opts or {}
+  package.loaded["vim_module.ui"] = nil  -- fresh queue instance
+  local env = { notify_log = {}, system_calls = 0 }
+
+  -- scratch buf, cursor row 2 (1-indexed)
+  env.buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_set_current_buf(env.buf)
+  vim.api.nvim_buf_set_lines(env.buf, 0, -1, false,
+    { "local x = 1", "local y = 2", "local z = 3" })
+  vim.api.nvim_win_set_cursor(0, { 2, 0 })
+
+  env.config = {
+    model = "sweep-model",
+    api_key_env = "TEST_SWEEP_KEY",
+    curl_bin = "/bin/curl",
+    budgets = { max_output_tokens = 256, context_tokens = 1000 },
+  }
+
+  if opts.api_key then
+    vim.env.TEST_SWEEP_KEY = opts.api_key
+  else
+    vim.env.TEST_SWEEP_KEY = nil
+  end
+
+  -- with_fake-style fake, script table built AT CONSTRUCTION
+  local dump_headers = opts.dump_headers
+  if dump_headers == nil then
+    dump_headers = "HTTP/2 200\n\n"  -- default gives parse_status its 2xx gate
+  end
+  local script = { dump_headers = dump_headers }
+
+  local captured
+  vim.system = function(cmd, opts_sys, on_exit)
+    env.system_calls = env.system_calls + 1
+    captured = { cmd = cmd, opts = opts_sys, on_exit = on_exit }
+    -- Mirror with_fake/real curl: write the dump at spawn when non-empty;
+    -- an explicit "" in opts.dump_headers skips the write entirely.
+    if type(script.dump_headers) == "string" and script.dump_headers ~= "" then
+      local dp
+      for i, v in ipairs(cmd) do
+        if v == "--dump-header" then dp = cmd[i + 1] end
+      end
+      if dp then
+        local df = io.open(dp, "w")
+        if df then df:write(script.dump_headers) df:close() end
+      end
+    end
+    return {
+      pid = 1,
+      kill = function() end,
+      wait = function() return 0 end,
+    }
+  end
+
+  vim.ui.input = function(_, cb) cb(opts.input) end  -- no cursor movement
+
+  vim.notify = function(msg, level)
+    env.notify_log[#env.notify_log + 1] = { msg = msg, level = level }
+  end
+
+  env.chunks = function(list)
+    for _, chunk in ipairs(list) do
+      assert(captured and captured.opts and captured.opts.stdout,
+        "ui_case_begin: no captured stdout callback (was generate spawned?)")
+      captured.opts.stdout(nil, chunk)
+    end
+  end
+  env.exit = function(code)
+    assert(type(captured and captured.on_exit) == "function",
+      "ui_case_begin: no captured on_exit (was generate spawned?)")
+    captured.on_exit({ code = code or 0, signal = 0 })
+  end
+  env.restore = function()
+    vim.system = ORIG_SYSTEM
+    vim.ui.input = ORIG_INPUT
+    vim.notify = ORIG_NOTIFY
+    vim.env.TEST_SWEEP_KEY = nil
+  end
+
+  env.ui = require("vim_module.ui")
+  env.ui.start(env.config)  -- submit synchronously
+  return env
+end
+
+-- 1. telemetry_completion_notify (CTX-02 budget visibility): a clean success
+-- carrying usage notifies EXACTLY once with the locked telemetry string.
+case("telemetry_completion_notify", function()
+  local env = ui_case_begin({ input = "write fib", api_key = "sk-sweep-FAKEKEY" })
+  env.chunks({
+    'event: message_start\ndata: {"type":"message_start","message":{}}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"line1\\n"}}\n\n',
+    'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":142}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  })
+  env.exit(0)
+  vim.wait(1000, function() return #env.notify_log > 0 end)
+  -- drive sanity: the streamed line landed in the buffer
+  local lines = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+  assert(table.concat(lines, "\n"):find("line1", 1, true),
+    "telemetry_completion_notify: drive sanity — streamed line must land in the buffer")
+  assert(#env.notify_log == 1,
+    "telemetry_completion_notify: want exactly 1 notify, got " .. #env.notify_log)
+  assert(env.notify_log[1].msg == "✓ done (142 tok)",
+    "telemetry_completion_notify: want msg '✓ done (142 tok)', got " .. tostring(env.notify_log[1].msg))
+  assert(env.notify_log[1].level == vim.log.levels.INFO,
+    "telemetry_completion_notify: want INFO level, got " .. tostring(env.notify_log[1].level))
+  env.restore()
+end)
+
+-- 2. telemetry_absent_noop: same drive with NO usage field — success stays
+-- silent, zero telemetry notifies.
+case("telemetry_absent_noop", function()
+  local env = ui_case_begin({ input = "write fib", api_key = "sk-sweep-FAKEKEY" })
+  env.chunks({
+    'event: message_start\ndata: {"type":"message_start","message":{}}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"line1\\n"}}\n\n',
+    'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  })
+  env.exit(0)
+  vim.wait(50)
+  -- drive sanity: the streamed line landed in the buffer
+  local lines = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+  assert(table.concat(lines, "\n"):find("line1", 1, true),
+    "telemetry_absent_noop: drive sanity — streamed line must land in the buffer")
+  for i, n in ipairs(env.notify_log) do
+    assert(not n.msg:find("tok", 1, true),
+      "telemetry_absent_noop: notify " .. i .. " must not contain 'tok', got " .. tostring(n.msg))
+  end
+  assert(#env.notify_log == 0,
+    "telemetry_absent_noop: success stays silent without usage — want 0 notifies, got " .. #env.notify_log)
+  env.restore()
+end)
+
+-- REQUIRED case enforcement
+local registered = {}
+for _, c in ipairs(cases) do registered[c.name] = true end
+for _, name in ipairs(REQUIRED) do
+  if not registered[name] then
+    error("sweep_spec: required case missing: " .. name)
+  end
+end
+
+local failures = {}
+for _, c in ipairs(cases) do
+  local ok, err = pcall(c.fn)
+  if ok then
+    print("PASS " .. c.name)
+  else
+    failures[#failures + 1] = c.name .. ": " .. tostring(err)
+    print("FAIL " .. c.name .. ": " .. tostring(err))
+  end
+end
+if #failures > 0 then
+  error("sweep_spec: " .. #failures .. " case(s) failed: " .. table.concat(failures, "; "))
+end
+print("sweep_spec: all " .. #cases .. " cases passed")
