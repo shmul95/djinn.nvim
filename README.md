@@ -41,7 +41,7 @@ All options live under `programs.vim-module.*` (home-manager):
 | `keymap` | str | `<D-f>` | Main trigger keymap (normal + insert) |
 | `fallback_keymap` | str | `<leader>af` | Terminal-safe fallback chord (Super silently fails in many terminals) |
 | `api_key_env` | str | `ANTHROPIC_API_KEY` | NAME of the environment variable read for the API key |
-| `curl_bin` | str | nixpkgs `curl` binary path (`lib.getExe pkgs.curl`) | Absolute path to the curl binary used for HTTPS |
+| `curl_bin` | str | `lib.getExe pkgs.curl` | Absolute path to the curl binary used for HTTPS |
 | `budgets.context_tokens` | int | `4000` | Token budget for per-request context packing |
 | `budgets.max_output_tokens` | int | `1024` | Token budget for generated output |
 
