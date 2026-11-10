@@ -65,7 +65,10 @@ function M.start(config)
     busy = true
 
     local client = require("vim_module.client")
-    local handle, err = client.generate({
+    -- client.generate can raise synchronously (temp-file write failure,
+    -- vim.json.encode on invalid buffer bytes, vim.system spawn throw) —
+    -- pcall so the raise can never strand busy == true with no handle.
+    local ok, handle, err = pcall(client.generate, {
       config = config,
       prompt = input,
       buf = buf,
@@ -90,6 +93,17 @@ function M.start(config)
         end
       end,
     })
+    if not ok then
+      -- Synchronous raise from client.generate: unwind the job and the busy
+      -- flag, then surface the error (vim.schedule — same fast-event rule as
+      -- on_complete).
+      busy = false
+      stream.finish(job)
+      vim.schedule(function()
+        vim.notify("vim-module: " .. tostring(handle), vim.log.levels.ERROR)
+      end)
+      return
+    end
     if handle == nil then
       -- Pre-flight failure from client.generate. This branch runs in
       -- main-loop context (M.start called generate synchronously) — no

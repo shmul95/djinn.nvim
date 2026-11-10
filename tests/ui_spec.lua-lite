@@ -9,6 +9,7 @@ local REQUIRED = {
   "error_notifies_error_level",
   "error_paints_failure_marker",
   "busy_refuses_second_job",
+  "sync_raise_clears_busy",
 }
 local function case(name, fn)
   cases[#cases + 1] = { name = name, fn = fn }
@@ -188,6 +189,43 @@ case("busy_refuses_second_job", function()
   assert(warned, "busy_refuses_second_job: must notify already generating at WARN level")
 
   -- Release the busy flag at the end of the case.
+  env.captured_opts.on_complete(nil)
+  vim.wait(50)
+  restore_env(env)
+end)
+
+case("sync_raise_clears_busy", function()
+  -- WR-02: client.generate can raise synchronously (temp-write failure,
+  -- encode failure, spawn throw). The raise must not strand busy == true,
+  -- and must surface as an ERROR notify.
+  local raised = false
+  local env = fresh_env("do stuff", function()
+    if not raised then
+      raised = true
+      error("boom-sync")
+    end
+  end)
+  env.ui.start(env.config)
+  vim.wait(1000, function() return #env.notify_log > 0 end)
+  local notified = false
+  for _, n in ipairs(env.notify_log) do
+    if n.level == vim.log.levels.ERROR and type(n.msg) == "string" and n.msg:find("boom-sync", 1, true) then
+      notified = true
+    end
+  end
+  assert(notified, "sync_raise_clears_busy: ERROR notify must carry the raise message")
+
+  -- busy must have been cleared by the raise path: a second start is accepted.
+  env.scripted_input = "again"
+  env.ui.start(env.config)
+  assert(env.generate_calls == 2,
+    "sync_raise_clears_busy: busy flag must be cleared after the raise (generate_calls=" .. env.generate_calls .. ")")
+  for _, n in ipairs(env.notify_log) do
+    assert(not (type(n.msg) == "string" and n.msg:find("already generating", 1, true)),
+      "sync_raise_clears_busy: second start must not hit the busy guard")
+  end
+
+  -- Release the second job at the end of the case.
   env.captured_opts.on_complete(nil)
   vim.wait(50)
   restore_env(env)
