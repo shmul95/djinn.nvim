@@ -24,6 +24,7 @@ local REQUIRED = {
   "continuation_filter_fast_event_safe",
   "continuation_blank_anchor_preserves_blanks",
   "digest_passed_to_generate",
+  "terminal_transition_prunes_payload",
 }
 local function case(name, fn)
   cases[#cases + 1] = { name = name, fn = fn }
@@ -771,6 +772,34 @@ case("digest_passed_to_generate", function()
     "digest_passed_to_generate: nil digest must pass through as nil (got " .. tostring(opts2 and opts2.digest) .. ")")
   vim.wait(50)
 
+  restore_ctx()
+  restore_env(env)
+end)
+
+case("terminal_transition_prunes_payload", function()
+  -- WR-09: terminal transitions must release the heavy payload fields —
+  -- prompt + digest (up to ~230KB) were retained forever in records[id] and
+  -- the queue's job table.
+  local restore_ctx = stub_digest("DIGEST-SENTINEL")
+  local env = fresh_env("do stuff", function(opts)
+    opts.on_complete(nil)
+  end)
+  env.ui.start(env.config)
+  local rec = env.queue:get(1).payload
+  assert(type(rec) == "table",
+    "terminal_transition_prunes_payload: queue payload must be the ui record")
+  assert(rec.prompt == "do stuff",
+    "terminal_transition_prunes_payload: precondition — record must carry the prompt before completion")
+  assert(rec.digest == "DIGEST-SENTINEL",
+    "terminal_transition_prunes_payload: precondition — record must carry the digest before completion")
+  vim.wait(1000, function() return env.queue:get(1).status == "done" end, 10)
+  assert(env.queue:get(1).status == "done",
+    "terminal_transition_prunes_payload: job must settle done")
+  local rec2 = env.queue:get(1).payload
+  assert(rec2.prompt == nil,
+    "terminal_transition_prunes_payload: prompt must be released on the terminal transition")
+  assert(rec2.digest == nil,
+    "terminal_transition_prunes_payload: digest must be released on the terminal transition")
   restore_ctx()
   restore_env(env)
 end)

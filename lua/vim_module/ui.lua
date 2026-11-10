@@ -169,6 +169,17 @@ local q = require("vim_module.queue").new({
     if new == "running" then
       running_record = job.payload  -- module-local tracking (used by cancel)
       paint_status(job.payload.stream_job, " Generating... ", "Comment")
+    elseif new == "done" or new == "failed" or new == "cancelled" then
+      -- WR-09: terminal transition releases the heavy payload fields — the
+      -- record holds prompt + digest (up to ~230KB) and records[id] /
+      -- q.jobs[id] retain it otherwise, forever.
+      if type(job.payload) == "table" then
+        job.payload.prompt = nil
+        job.payload.digest = nil
+      end
+      if running_record == job.payload then
+        running_record = nil
+      end
     end
     -- done: stream.finish already cleared the status. failed: painted in on_complete.
     -- cancelled: stream.finish already ran (running) or nothing painted (drained).
