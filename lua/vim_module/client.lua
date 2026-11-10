@@ -164,11 +164,18 @@ end
 function M.parse_status(dump_path)
   local f = io.open(dump_path, "r")
   if not f then return nil end
-  local first_line = f:read("*l")
+  local content = f:read("*a")
   f:close()
-  if not first_line then return nil end
-  local status = first_line:match("HTTP/%d[%d%.]* (%d+)")
-  return tonumber(status)
+  if not content then return nil end
+  -- LAST status line wins: proxy CONNECT blocks ("HTTP/1.1 200 Connection
+  -- established") and interim 1xx responses precede the real response in
+  -- --dump-header; reading line 1 made every proxied error look like success.
+  local status
+  for line in content:gmatch("[^\n]+") do
+    local s = line:match("HTTP/%d[%d%.]* (%d+)")
+    if s then status = tonumber(s) end
+  end
+  return status
 end
 
 function M.parse_retry_after(dump_path)

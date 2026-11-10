@@ -17,6 +17,7 @@ local REQUIRED = {
   "retry_after_surfaced",
   "cancel_keeps_partial",
   "fence_stripping",
+  "proxy_status_takes_last_line",
 }
 local function case(name, fn)
   cases[#cases + 1] = { name = name, fn = fn }
@@ -374,6 +375,21 @@ case("fence_stripping", function()
     assert(#lines == 2 and lines[1] == "def f():" and lines[2] == "    return 42",
       "fence_stripping: lines want {def f():,    return 42} got {" .. table.concat(lines, ",") .. "}")
   end)
+end)
+
+-- 12. proxy_status_takes_last_line (CR-02): a proxy CONNECT 200 (or interim
+-- 1xx) block before the real response must NOT be read as the status — the
+-- LAST HTTP status line of --dump-header wins.
+case("proxy_status_takes_last_line", function()
+  local path = vim.fn.tempname()
+  local f = io.open(path, "w")
+  assert(f, "proxy_status_takes_last_line: cannot create dump fixture")
+  f:write("HTTP/1.1 200 Connection established\nHTTP/2 429\n")
+  f:close()
+  local status = client.parse_status(path)
+  os.remove(path)
+  assert(status == 429,
+    "proxy_status_takes_last_line: want 429 (last line wins over proxy CONNECT 200) got " .. tostring(status))
 end)
 
 -- REQUIRED case enforcement
