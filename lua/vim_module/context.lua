@@ -237,12 +237,15 @@ function M.render_digest(manifest)
     acc[#acc + 1] = text
     used = used + #text
   end
-  return "<project_tree>\n"
+  -- WR-03: neutralize the framing close delimiter inside digest content —
+  -- untrusted repo text must never be able to close a <project_files> block
+  -- (defense in depth; pack() re-neutralizes at the framing boundary).
+  return (("<project_tree>\n"
     .. table.concat(lines, "\n")
     .. "\n</project_tree>\n\n"
     .. "<project_docs>\n"
     .. table.concat(acc)
-    .. "\n</project_docs>"
+    .. "\n</project_docs>"):gsub("</project_files>", "</project_files >"))
 end
 
 -- Budget packing (CTX-02). Priority when over budget:
@@ -258,6 +261,12 @@ function M.pack(opts)
   local request = opts.request or ""
   local slice = opts.slice or ""
   local digest = opts.digest
+  -- WR-03: framing must be unbreakable — neutralize any close delimiter
+  -- inside the digest BEFORE it is pasted between the <project_files> tags,
+  -- so repo content can neither close the block early nor forge one.
+  if digest ~= nil then
+    digest = (digest:gsub("</project_files>", "</project_files >"))
+  end
   local budget = opts.budget_chars or 0
   local digest_truncated = false
   local digest_dropped = false
