@@ -10,6 +10,11 @@ local REQUIRED = {
   "telemetry_completion_notify",
   "telemetry_absent_noop",
   "failure_matrix_429",
+  "failure_matrix_missing_key",
+  "failure_matrix_401",
+  "failure_matrix_500",
+  "failure_matrix_malformed_sse",
+  "failure_matrix_network_down",
 }
 local function case(name, fn)
   cases[#cases + 1] = { name = name, fn = fn }
@@ -240,6 +245,10 @@ case("failure_matrix_429", function()
     "failure_matrix_429: msg must contain 'Rate limited — retry after 30s', got " .. tostring(env.notify_log[1].msg))
   assert(env.system_calls == 1,
     "failure_matrix_429: no auto-retry — want 1 spawn, got " .. env.system_calls)
+  for _, e in ipairs(env.notify_log) do
+    assert(not e.msg:find("sk-sweep", 1, true),
+      "failure_matrix_429: fixture key leaked into notify: " .. e.msg)
+  end
   env.restore()
 end)
 
@@ -267,6 +276,10 @@ case("failure_matrix_429_no_retry_header", function()
     "failure_matrix_429_no_retry_header: no retry-after header -> no retry text, got " .. tostring(env.notify_log[1].msg))
   assert(env.system_calls == 1,
     "failure_matrix_429_no_retry_header: no auto-retry — want 1 spawn, got " .. env.system_calls)
+  for _, e in ipairs(env.notify_log) do
+    assert(not e.msg:find("sk-sweep", 1, true),
+      "failure_matrix_429_no_retry_header: fixture key leaked into notify: " .. e.msg)
+  end
   env.restore()
 
   -- body carried no message: fallback surfaces "HTTP 429"
@@ -285,7 +298,141 @@ case("failure_matrix_429_no_retry_header", function()
     "failure_matrix_429_no_retry_header: body-less 429 must surface 'HTTP 429', got " .. tostring(env2.notify_log[1].msg))
   assert(not env2.notify_log[1].msg:find("retry after", 1, true),
     "failure_matrix_429_no_retry_header (HTTP fallback): no retry text without a header, got " .. tostring(env2.notify_log[1].msg))
+  for _, e in ipairs(env2.notify_log) do
+    assert(not e.msg:find("sk-sweep", 1, true),
+      "failure_matrix_429_no_retry_header (HTTP fallback): fixture key leaked into notify: " .. e.msg)
+  end
   env2.restore()
+end)
+
+-- 5. failure_matrix_missing_key (GEN-06): pre-flight refuses a doomed request —
+-- unset key means NO spawn (system_calls == 0), exactly one ERROR notify,
+-- buffer unchanged. T-05-06: no fixture key in any notify.
+case("failure_matrix_missing_key", function()
+  local env = ui_case_begin({ input = "write fib", api_key = false, dump_headers = "" })
+  local ok, err = pcall(function()
+    assert(#env.notify_log == 1,
+      "failure_matrix_missing_key: want exactly 1 notify, got " .. #env.notify_log)
+    assert(env.notify_log[1].level == vim.log.levels.ERROR,
+      "failure_matrix_missing_key: want ERROR level, got " .. tostring(env.notify_log[1].level))
+    assert(env.notify_log[1].msg:find("API key not found in TEST_SWEEP_KEY", 1, true),
+      "failure_matrix_missing_key: msg must contain 'API key not found in TEST_SWEEP_KEY', got " .. tostring(env.notify_log[1].msg))
+    assert(env.system_calls == 0,
+      "failure_matrix_missing_key: pre-flight must refuse before any spawn, got " .. env.system_calls .. " spawns")
+    local lines = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+    assert(#lines == 3 and lines[1] == "local x = 1" and lines[2] == "local y = 2" and lines[3] == "local z = 3",
+      "failure_matrix_missing_key: buffer must be unchanged, got " .. table.concat(lines, "|"))
+    for _, e in ipairs(env.notify_log) do
+      assert(not e.msg:find("sk-sweep", 1, true),
+        "failure_matrix_missing_key: fixture key leaked into notify: " .. e.msg)
+    end
+  end)
+  env.restore()
+  if not ok then error(err, 0) end
+end)
+
+-- 6. failure_matrix_401 (GEN-06): authentication failure surfaces the API error
+-- message at ERROR level. T-05-06: no fixture key in any notify.
+case("failure_matrix_401", function()
+  local env = ui_case_begin({ input = "write fib", api_key = "sk-sweep-FAKEKEY", dump_headers = "HTTP/2 401\n\n" })
+  env.chunks({ [[{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}]] })
+  env.exit(22)
+  vim.wait(1000, function() return #env.notify_log > 0 end)
+  vim.wait(50)  -- settle: the exactly-one assertion must not race a second notify
+  local ok, err = pcall(function()
+    assert(#env.notify_log == 1,
+      "failure_matrix_401: want exactly 1 notify, got " .. #env.notify_log)
+    assert(env.notify_log[1].level == vim.log.levels.ERROR,
+      "failure_matrix_401: want ERROR level, got " .. tostring(env.notify_log[1].level))
+    assert(env.notify_log[1].msg:find("invalid x-api-key", 1, true),
+      "failure_matrix_401: msg must contain 'invalid x-api-key', got " .. tostring(env.notify_log[1].msg))
+    for _, e in ipairs(env.notify_log) do
+      assert(not e.msg:find("sk-sweep", 1, true),
+        "failure_matrix_401: fixture key leaked into notify: " .. e.msg)
+    end
+  end)
+  env.restore()
+  if not ok then error(err, 0) end
+end)
+
+-- 7. failure_matrix_500 (GEN-06): server error surfaces the API error message at
+-- ERROR level. T-05-06: no fixture key in any notify.
+case("failure_matrix_500", function()
+  local env = ui_case_begin({ input = "write fib", api_key = "sk-sweep-FAKEKEY", dump_headers = "HTTP/2 500\n\n" })
+  env.chunks({ [[{"type":"error","error":{"type":"api_error","message":"boom"}}]] })
+  env.exit(22)
+  vim.wait(1000, function() return #env.notify_log > 0 end)
+  vim.wait(50)  -- settle: the exactly-one assertion must not race a second notify
+  local ok, err = pcall(function()
+    assert(#env.notify_log == 1,
+      "failure_matrix_500: want exactly 1 notify, got " .. #env.notify_log)
+    assert(env.notify_log[1].level == vim.log.levels.ERROR,
+      "failure_matrix_500: want ERROR level, got " .. tostring(env.notify_log[1].level))
+    assert(env.notify_log[1].msg:find("boom", 1, true),
+      "failure_matrix_500: msg must contain 'boom', got " .. tostring(env.notify_log[1].msg))
+    for _, e in ipairs(env.notify_log) do
+      assert(not e.msg:find("sk-sweep", 1, true),
+        "failure_matrix_500: fixture key leaked into notify: " .. e.msg)
+    end
+  end)
+  env.restore()
+  if not ok then error(err, 0) end
+end)
+
+-- 8. failure_matrix_malformed_sse (GEN-06): malformed JSON frames are skipped
+-- (never garble the buffer); in-stream error events surface as ERROR notify.
+-- T-05-06: no fixture key in any notify.
+case("failure_matrix_malformed_sse", function()
+  local env = ui_case_begin({ input = "write fib", api_key = "sk-sweep-FAKEKEY", dump_headers = "HTTP/2 200\n\n" })
+  env.chunks({
+    'data: {not-json}\n\n',
+    'event: error\ndata: {"type":"error","error":{"message":"Overloaded"}}\n\n',
+  })
+  env.exit(0)
+  vim.wait(1000, function() return #env.notify_log > 0 end)
+  vim.wait(50)  -- settle: the exactly-one assertion must not race a second notify
+  local ok, err = pcall(function()
+    assert(#env.notify_log == 1,
+      "failure_matrix_malformed_sse: want exactly 1 notify, got " .. #env.notify_log)
+    assert(env.notify_log[1].level == vim.log.levels.ERROR,
+      "failure_matrix_malformed_sse: want ERROR level, got " .. tostring(env.notify_log[1].level))
+    assert(env.notify_log[1].msg:find("Overloaded", 1, true),
+      "failure_matrix_malformed_sse: msg must contain 'Overloaded', got " .. tostring(env.notify_log[1].msg))
+    local lines = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+    assert(#lines == 3 and lines[1] == "local x = 1" and lines[2] == "local y = 2" and lines[3] == "local z = 3",
+      "failure_matrix_malformed_sse: buffer must be unchanged (malformed frame skipped, never inserted), got " .. table.concat(lines, "|"))
+    for _, e in ipairs(env.notify_log) do
+      assert(not e.msg:find("sk-sweep", 1, true),
+        "failure_matrix_malformed_sse: fixture key leaked into notify: " .. e.msg)
+    end
+  end)
+  env.restore()
+  if not ok then error(err, 0) end
+end)
+
+-- 9. failure_matrix_network_down (GEN-06): curl exit 7 (failed to connect) with
+-- no dump file and empty stdout — the real fallback ("HTTP " .. tostring(status
+-- or out.code)) produces "HTTP 7". T-05-06: no fixture key in any notify.
+case("failure_matrix_network_down", function()
+  local env = ui_case_begin({ input = "write fib", api_key = "sk-sweep-FAKEKEY", dump_headers = "" })
+  -- no chunks (curl never connected — stdout stays empty), NO dump file written
+  env.exit(7)   -- curl exit 7 = failed to connect to host
+  vim.wait(1000, function() return #env.notify_log > 0 end)
+  vim.wait(50)  -- settle: the exactly-one assertion must not race a second notify
+  local ok, err = pcall(function()
+    assert(#env.notify_log == 1,
+      "failure_matrix_network_down: want exactly 1 notify, got " .. #env.notify_log)
+    assert(env.notify_log[1].level == vim.log.levels.ERROR,
+      "failure_matrix_network_down: want ERROR level, got " .. tostring(env.notify_log[1].level))
+    assert(env.notify_log[1].msg:find("HTTP 7", 1, true),
+      "failure_matrix_network_down: msg must contain 'HTTP 7' (real fallback), got " .. tostring(env.notify_log[1].msg))
+    for _, e in ipairs(env.notify_log) do
+      assert(not e.msg:find("sk-sweep", 1, true),
+        "failure_matrix_network_down: fixture key leaked into notify: " .. e.msg)
+    end
+  end)
+  env.restore()
+  if not ok then error(err, 0) end
 end)
 
 -- REQUIRED case enforcement
