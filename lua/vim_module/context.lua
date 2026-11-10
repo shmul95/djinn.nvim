@@ -177,11 +177,28 @@ local function step(state)
   return #state.work == 0
 end
 
+-- WR-11: cheap membership hash — file_count + max_mtime has a TOCTOU hole
+-- (delete + add in the same second reports fresh on a wrong-membership
+-- manifest). Rolling hash over the SORTED relpaths (double-precision math
+-- only, no bit ops — every intermediate stays below 2^53).
+local function tree_hash_of(tree)
+  local h = 2166136261
+  for i = 1, #tree do
+    local p = tree[i]
+    for j = 1, #p do
+      h = (h * 33 + p:byte(j)) % 4294967296
+    end
+    h = (h * 33 + 10) % 4294967296  -- path separator
+  end
+  return h
+end
+
 local function finalize(state)
   table.sort(state.tree)
   return {
     file_count = state.file_count,
     max_mtime = state.max_mtime,
+    tree_hash = tree_hash_of(state.tree),
     tree = state.tree,
     docs = state.docs,
   }
@@ -412,10 +429,13 @@ function M.save_cache(root, manifest)
   vim.uv.fs_chmod(path, 384)
 end
 
--- Pure. Staleness = file-count or max-mtime change (documented TTL is
--- secondary and not implemented).
+-- Pure. Staleness = file-count, max-mtime, or tree-membership-hash change
+-- (documented TTL is secondary and not implemented). The hash closes the
+-- WR-11 TOCTOU: same-count membership swaps with equal max_mtime.
 function M.needs_refresh(cached, fresh)
-  return cached.file_count ~= fresh.file_count or cached.max_mtime ~= fresh.max_mtime
+  return cached.file_count ~= fresh.file_count
+    or cached.max_mtime ~= fresh.max_mtime
+    or cached.tree_hash ~= fresh.tree_hash
 end
 
 -- Walk (inline drain of all chunks) + save; returns manifest. Spec entry

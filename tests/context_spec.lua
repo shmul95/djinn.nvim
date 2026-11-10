@@ -18,6 +18,7 @@ local REQUIRED = {
   "tampered_cache_rebuilds_no_raise",
   "stale_file_count_triggers_refresh",
   "stale_mtime_triggers_refresh",
+  "same_count_membership_swap_triggers_refresh",
   "cold_get_digest_nonblocking",
   "render_caps",
   "gitignore_pattern_parse",
@@ -332,6 +333,54 @@ case("stale_mtime_triggers_refresh", function()
   local r2 = context.get_digest(proj)
   assert(r2 and r2:find("readme-v2-SENTINEL", 1, true),
     "stale_mtime_triggers_refresh: refreshed digest must contain readme-v2-SENTINEL")
+end)
+
+case("same_count_membership_swap_triggers_refresh", function()
+  -- WR-11: count+mtime staleness has a TOCTOU hole — delete one file and add
+  -- another in the same second (same file_count, same max_mtime) and the
+  -- stale digest is pinned forever. A cheap tree hash must catch the swap.
+  local context = ctx()
+  local base = vim.fn.tempname()
+  local proj = base .. "/proj"
+  vim.fn.mkdir(proj, "p")
+  write_file(proj .. "/a.txt", "a-SENTINEL\n")
+  write_file(proj .. "/b.txt", "b-SENTINEL\n")
+  write_file(proj .. "/c.txt", "c-SENTINEL\n")
+  cleanup_roots[#cleanup_roots + 1] = base
+  fixture_roots[#fixture_roots + 1] = proj
+  context.build_sync(proj)
+  local cached = context.load_cache(proj)
+  assert(cached and cached.file_count == 3 and type(cached.tree_hash) == "number",
+    "same_count_membership_swap_triggers_refresh: baseline cache must carry file_count 3 and a tree_hash")
+  -- pure contract: equal scalars, different membership -> stale
+  assert(context.needs_refresh(
+    { file_count = 3, max_mtime = 10, tree_hash = 1 },
+    { file_count = 3, max_mtime = 10, tree_hash = 2 }) == true,
+    "same_count_membership_swap_triggers_refresh: needs_refresh must fire on tree_hash change")
+  assert(context.needs_refresh(
+    { file_count = 3, max_mtime = 10, tree_hash = 7 },
+    { file_count = 3, max_mtime = 10, tree_hash = 7 }) == false,
+    "same_count_membership_swap_triggers_refresh: needs_refresh must hold when the hash matches")
+  -- live membership swap: delete a.txt, add d.txt pinned to the cached
+  -- max_mtime so BOTH count and mtime scalars stay identical.
+  assert(os.remove(proj .. "/a.txt"),
+    "same_count_membership_swap_triggers_refresh: cannot delete a.txt")
+  write_file(proj .. "/d.txt", "d-SENTINEL\n")
+  assert(vim.uv.fs_utime(proj .. "/d.txt", cached.max_mtime, cached.max_mtime),
+    "same_count_membership_swap_triggers_refresh: fs_utime failed")
+  local r = context.get_digest(proj)
+  assert(r ~= nil and not r:find("d.txt", 1, true),
+    "same_count_membership_swap_triggers_refresh: pre-refresh digest must still be stale")
+  local ok = vim.wait(2000, function()
+    local c = context.load_cache(proj)
+    return c ~= nil and c.tree_hash ~= cached.tree_hash
+  end)
+  assert(ok, "same_count_membership_swap_triggers_refresh: cache never refreshed on the membership swap")
+  local r2 = context.get_digest(proj)
+  assert(r2 and r2:find("d.txt", 1, true),
+    "same_count_membership_swap_triggers_refresh: refreshed digest must list d.txt")
+  assert(not r2:find("a.txt", 1, true),
+    "same_count_membership_swap_triggers_refresh: refreshed digest must drop deleted a.txt")
 end)
 
 case("cold_get_digest_nonblocking", function()
