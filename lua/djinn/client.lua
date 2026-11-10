@@ -36,13 +36,16 @@ function M.build_headers(api_key)
     .. "anthropic-version: 2023-06-01\n"
 end
 
-function M.build_curl_args(curl_bin, header_path, body_path, dump_path)
+function M.build_curl_args(curl_bin, header_path, body_path, dump_path, base_url)
+  -- base_url: Anthropic-compatible API root (e.g. https://api.deepseek.com/anthropic).
+  -- Trailing slashes are stripped so both forms yield "<root>/v1/messages".
+  local url = (base_url or "https://api.anthropic.com"):gsub("/+$", "") .. "/v1/messages"
   return {
     curl_bin, "-N", "--no-buffer",
     "--dump-header", dump_path,
     "--header", "@" .. header_path,
     "--data-binary", "@" .. body_path,
-    "https://api.anthropic.com/v1/messages",
+    url,
   }
 end
 
@@ -287,7 +290,7 @@ function M.generate(opts)
     written[#written + 1] = dump_path
 
     -- Build argv
-    local argv = M.build_curl_args(curl_bin, header_path, body_path, dump_path)
+    local argv = M.build_curl_args(curl_bin, header_path, body_path, dump_path, opts.config.base_url)
 
     -- SSE parser (require at call time)
     local sse = require("djinn.sse")

@@ -845,7 +845,7 @@ case("cited_proofs_exist", function()
 end)
 
 -- 15. readme_options_sync (CFG-03): README options table matches
--- home-manager.nix defaults exactly (8 paired fragments + row count).
+-- home-manager.nix defaults exactly (9 paired fragments + row count).
 case("readme_options_sync", function()
   local readme = read_file(root .. "/README.md")
   local hmn = read_file(root .. "/home-manager.nix")
@@ -855,6 +855,7 @@ case("readme_options_sync", function()
   local pairs_to_check = {
     { hmn = 'default = false', readme = '| `enable` | bool | `false` |' },
     { hmn = 'default = "claude-haiku-4-5"', readme = '| `model` | str | `claude-haiku-4-5` |' },
+    { hmn = 'default = "https://api.anthropic.com"', readme = '| `base_url` | str | `https://api.anthropic.com` |' },
     { hmn = 'default = "<D-f>"', readme = '| `keymap` | str | `<D-f>` |' },
     { hmn = 'default = "<leader>af"', readme = '| `fallback_keymap` | str | `<leader>af` |' },
     { hmn = 'default = "ANTHROPIC_API_KEY"', readme = '| `api_key_env` | str | `ANTHROPIC_API_KEY` |' },
@@ -869,13 +870,13 @@ case("readme_options_sync", function()
       "readme_options_sync: README.md missing row '" .. pair.readme .. "'")
   end
 
-  -- Exactly 8 option rows in README (catches stale/extra rows)
+  -- Exactly 9 option rows in README (catches stale/extra rows)
   local row_count = 0
   for line in readme:gmatch("[^\n]+") do
     if line:match("^| `") then row_count = row_count + 1 end
   end
-  assert(row_count == 8,
-    "readme_options_sync: want exactly 8 option rows in README, got " .. row_count)
+  assert(row_count == 9,
+    "readme_options_sync: want exactly 9 option rows in README, got " .. row_count)
 end)
 
 -- 16. readme_manual_steps_and_version (CFG-03): manual steps section present

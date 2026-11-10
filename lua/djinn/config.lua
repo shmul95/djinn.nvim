@@ -5,6 +5,7 @@ local M = {}
 
 M.defaults = {
   model           = "claude-haiku-4-5",
+  base_url        = "https://api.anthropic.com",
   keymap          = "<D-f>",
   fallback_keymap = "<leader>af",
   api_key_env     = "ANTHROPIC_API_KEY",
@@ -27,7 +28,7 @@ local function deep_copy(value)
 end
 
 -- The known top-level keys are the frozen contract in the plan <interfaces>
--- block (model, keymap, fallback_keymap, api_key_env, curl_bin, budgets).
+-- block (model, base_url, keymap, fallback_keymap, api_key_env, curl_bin, budgets).
 -- Unknown top-level keys are copied through unchanged (forward compatibility
 -- for Phases 2-4).
 function M.merge(opts)

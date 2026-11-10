@@ -11,7 +11,7 @@ let
   # the payload (otherwise a value containing e.g. ']==]' terminates the string
   # early and the remainder executes as Lua at editor startup).
   setupJson = builtins.toJSON {
-    model = cfg.model; keymap = cfg.keymap; fallback_keymap = cfg.fallback_keymap;
+    model = cfg.model; base_url = cfg.base_url; keymap = cfg.keymap; fallback_keymap = cfg.fallback_keymap;
     api_key_env = cfg.api_key_env; curl_bin = cfg.curl_bin; budgets = cfg.budgets;
   };
   # least n >= 0 such that ']' + n*'=' + ']' is not a substring of setupJson
@@ -23,6 +23,7 @@ in {
   options.programs.djinn = {
     enable = mkEnableOption "djinn.nvim AI function generation" // { default = false; };
     model = mkOption { type = types.str; default = "claude-haiku-4-5"; description = "Anthropic model id"; };
+    base_url = mkOption { type = types.str; default = "https://api.anthropic.com"; description = "API root; set for Anthropic-compatible providers (e.g. https://api.deepseek.com/anthropic)"; };
     keymap = mkOption { type = types.str; default = "<D-f>"; description = "Primary trigger keymap (normal + insert)"; };
     fallback_keymap = mkOption { type = types.str; default = "<leader>af"; description = "Terminal-safe fallback chord"; };
     api_key_env = mkOption { type = types.str; default = "ANTHROPIC_API_KEY"; description = "NAME of the env var holding the API key — never a key value"; };

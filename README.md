@@ -40,6 +40,7 @@ All options live under `programs.djinn.*` (home-manager):
 |--------|------|---------|-------------|
 | `enable` | bool | `false` | Enable the plugin |
 | `model` | str | `claude-haiku-4-5` | Anthropic model id used for generation |
+| `base_url` | str | `https://api.anthropic.com` | API root — set for Anthropic-compatible providers (e.g. `https://api.deepseek.com/anthropic`) |
 | `keymap` | str | `<D-f>` | Main trigger keymap (normal + insert) |
 | `fallback_keymap` | str | `<leader>af` | Terminal-safe fallback chord (Super silently fails in many terminals) |
 | `api_key_env` | str | `ANTHROPIC_API_KEY` | NAME of the environment variable read for the API key |
