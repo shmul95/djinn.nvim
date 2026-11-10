@@ -21,6 +21,7 @@ local REQUIRED = {
   "continuation_request_word_trigger",
   "generate_mode_unfiltered",
   "continuation_indent_tabs",
+  "continuation_filter_fast_event_safe",
   "digest_passed_to_generate",
 }
 local function case(name, fn)
@@ -673,6 +674,49 @@ case("continuation_indent_tabs", function()
     "continuation_indent_tabs: first body line must be one tab + 'return 1', got " .. vim.inspect(lines[2]))
   assert(lines[3] == "\t\tx = 2",
     "continuation_indent_tabs: nested line must be two tabs + 'x = 2', got " .. vim.inspect(lines[3]))
+  restore_ctx()
+  restore_env(env)
+end)
+
+case("continuation_filter_fast_event_safe", function()
+  -- CR-01: in production on_lines runs inside a vim.system stdout callback
+  -- (fast event). The continuation filter must use only captured state there —
+  -- a vim.bo read at feed time raises E5560 and the body never lands.
+  local restore_ctx = stub_digest("DIGEST-SENTINEL")
+  local env = fresh_env("write the rest", function() end)
+  vim.api.nvim_buf_set_lines(env.buf, 0, -1, false, { "def fib(n):", "x = 1" })
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  vim.bo[env.buf].expandtab = true
+  vim.bo[env.buf].shiftwidth = 4
+  safe_input(env)
+  env.ui.start(env.config)
+  local opts1 = env.captured_opts
+  assert(opts1 and opts1.mode == "continuation",
+    "continuation_filter_fast_event_safe: mode must be continuation")
+  -- Drive on_lines from a REAL vim.system stdout callback — the production
+  -- fast-event path (same shape as the client's SSE feed).
+  local fired = false
+  local saw_fast = false
+  vim.system({ "printf", "x" }, {
+    stdout = function(_, data)
+      if data and not fired then
+        fired = true
+        saw_fast = vim.in_fast_event()
+        opts1.on_lines({ "return n" })
+      end
+    end,
+  }, function() end)
+  vim.wait(2000, function()
+    local l = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+    return #l == 3 and l[2] == "    return n"
+  end, 10)
+  assert(saw_fast,
+    "continuation_filter_fast_event_safe: stdout callback must run in a fast event for this case to prove anything")
+  local lines = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+  assert(vim.deep_equal(lines, { "def fib(n):", "    return n", "x = 1" }),
+    "continuation_filter_fast_event_safe: body must land from a fast-event on_lines (E5560 regression), got " .. vim.inspect(lines))
+  opts1.on_complete(nil)
+  vim.wait(50)
   restore_ctx()
   restore_env(env)
 end)

@@ -32,7 +32,11 @@ local function make_continuation_filter(buf, header_line)
   local ts = vim.bo[buf].tabstop > 0 and vim.bo[buf].tabstop or 8
   local sw = vim.bo[buf].shiftwidth
   if sw == 0 then sw = ts end
-  local level = vim.bo[buf].expandtab and string.rep(" ", sw) or "\t"
+  -- CR-01: capture expandtab ONCE at creation (main loop). The filter body
+  -- runs in the client's SSE fast event; re-reading vim.bo there raises
+  -- E5560 and the continuation output never lands.
+  local expandtab = vim.bo[buf].expandtab
+  local level = expandtab and string.rep(" ", sw) or "\t"
   local target = header_indent .. level
   local base_width = nil  -- indent WIDTH (visual columns: tab = ts) of first non-blank body line
   local function width_of(line)
@@ -58,7 +62,7 @@ local function make_continuation_filter(buf, header_line)
       local rel = math.max(0, w - base_width)
       local body = line:match("^[ \t]*(.*)$") or line
       local rel_indent
-      if vim.bo[buf].expandtab then
+      if expandtab then
         rel_indent = string.rep(" ", rel)
       else
         rel_indent = string.rep("\t", math.floor(rel / sw)) .. string.rep(" ", rel % sw)
