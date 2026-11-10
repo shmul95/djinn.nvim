@@ -3,24 +3,26 @@ local root = this:match("^(.*)/tests/") or "."
 package.path = root .. "/lua/?.lua;" .. package.path
 
 local cases = {}
--- TEMPORARY (REMOVED in Task 2 of this plan): lets the Task 1 interim verify
--- skip the two Phase 3 busy cases that Task 2 migrates.
-local skip_busy = os.getenv("UI_SKIP_BUSY") == "1"
 local REQUIRED = {
   "esc_aborts_zero_change",
   "empty_input_aborts",
   "error_notifies_error_level",
   "error_paints_failure_marker",
-  "busy_refuses_second_job",
   "sync_raise_clears_busy",
-  "busy_race_second_submit_refused",
+  "busy_second_submit_queues",
+  "busy_race_second_submit_queues",
+  "queued_pending_indicator",
+  "sequential_second_starts_after_first",
+  "cancel_running_keeps_partial",
+  "cancel_all_drains_zero_change",
+  "undo_block_per_job",
 }
 local function case(name, fn)
   cases[#cases + 1] = { name = name, fn = fn }
 end
 
--- Shared harness: fresh ui module state (resets the busy flag / current
--- handle), a scratch buffer with the cursor at 0-indexed row 1, stream.create
+-- Shared harness: fresh ui module state (resets the queue-backed runner), a
+-- scratch buffer with the cursor at 0-indexed row 1, stream.create
 -- spied on the REAL stream.lua (real extmark behavior is needed for the
 -- failure-marker case), client.generate fully stubbed (zero network), and a
 -- prompt-contract vim.ui.input stub that MOVES the cursor before submit
@@ -32,6 +34,7 @@ local function fresh_env(scripted_input, fire_in_generate)
   env.input_calls = 0
   env.generate_calls = 0
   env.create_calls = 0
+  env.cancel_calls = 0
   env.create_row = nil
   env.job = nil
   env.captured_opts = nil
@@ -66,7 +69,7 @@ local function fresh_env(scripted_input, fire_in_generate)
       env.generate_calls = env.generate_calls + 1
       env.captured_opts = opts
       if fire_in_generate then fire_in_generate(opts) end
-      return { cancel = function() end }
+      return { cancel = function() env.cancel_calls = (env.cancel_calls or 0) + 1 end }
     end,
   }
 
@@ -83,6 +86,15 @@ local function fresh_env(scripted_input, fire_in_generate)
     env.notify_log[#env.notify_log + 1] = { msg = msg, level = level }
   end
 
+  -- Capture the queue instance the ui module builds at load time, so cases
+  -- can assert job terminal statuses via env.queue:get(id).
+  env.real_queue_mod = require("vim_module.queue")
+  env.real_queue_new = env.real_queue_mod.new
+  env.real_queue_mod.new = function(opts)
+    env.queue = env.real_queue_new(opts)
+    return env.queue
+  end
+
   package.loaded["vim_module.ui"] = nil
   env.ui = require("vim_module.ui")
   return env
@@ -92,6 +104,7 @@ local function restore_env(env)
   vim.ui.input = env.real_input
   vim.notify = env.real_notify
   env.real_stream.create = env.real_create
+  env.real_queue_mod.new = env.real_queue_new
   package.loaded["vim_module.client"] = env.real_client
 end
 
@@ -173,26 +186,55 @@ case("error_paints_failure_marker", function()
   restore_env(env)
 end)
 
-case("busy_refuses_second_job", function()
+case("busy_second_submit_queues", function()
+  -- SEMANTIC BREAK (Phase 4 vs Phase 3): Phase 3 REFUSED the second job
+  -- while busy; Phase 4 QUEUES it. Migrated in place from the Phase 3
+  -- second-job-refused case — assertions inverted to queueing semantics,
+  -- still fail-able against BOTH
+  -- regressions: a return to refusal (prompt-open / WARN assertions) and a
+  -- concurrent double-run (generate_calls assertion).
   local env = fresh_env("first")  -- generate stub does NOT fire on_complete: job stays in flight
   env.ui.start(env.config)
-  assert(env.generate_calls == 1, "busy_refuses_second_job: first job must start")
-  assert(env.input_calls == 1, "busy_refuses_second_job: prompt must open once")
+  assert(env.generate_calls == 1, "busy_second_submit_queues: first job must start")
+  assert(env.input_calls == 1, "busy_second_submit_queues: prompt must open once")
 
   env.scripted_input = "second"
   env.ui.start(env.config)
-  assert(env.generate_calls == 1, "busy_refuses_second_job: second job must be refused")
-  assert(env.input_calls == 1, "busy_refuses_second_job: busy guard must return BEFORE the prompt opens")
+  assert(env.input_calls == 2,
+    "busy_second_submit_queues: prompt must open even while busy (queueing, not refusal)")
+  assert(env.generate_calls == 1,
+    "busy_second_submit_queues: second must NOT start while first runs")
+  assert(env.create_calls == 2,
+    "busy_second_submit_queues: queued anchor must exist (job not dropped)")
+  local job2 = env.job
+  local e2 = vim.api.nvim_buf_get_extmark_by_id(job2.buf, job2.ns, job2.end_id, { details = true })
+  assert(e2 and #e2 > 0 and e2[3] and e2[3].virt_text and e2[3].virt_text[1]
+    and type(e2[3].virt_text[1][1]) == "string"
+    and e2[3].virt_text[1][1]:find("Queued", 1, true) ~= nil,
+    "busy_second_submit_queues: queued anchor must show the Queued pending indicator")
 
-  local warned = false
   for _, n in ipairs(env.notify_log) do
-    if type(n.msg) == "string" and n.msg:find("already generating", 1, true) and n.level == vim.log.levels.WARN then
-      warned = true
-    end
+    assert(not (type(n.msg) == "string" and n.msg:find("already generating", 1, true)),
+      "busy_second_submit_queues: queueing must not notify 'already generating'")
   end
-  assert(warned, "busy_refuses_second_job: must notify already generating at WARN level")
 
-  -- Release the busy flag at the end of the case.
+  -- Complete the FIRST job: the queued second must start after it and
+  -- repaint its anchor to Generating.
+  env.captured_opts.on_complete(nil)
+  vim.wait(1000, function() return env.generate_calls == 2 end, 10)
+  assert(env.generate_calls == 2,
+    "busy_second_submit_queues: second must start after the first completes")
+  local function job2_generating()
+    local e = vim.api.nvim_buf_get_extmark_by_id(job2.buf, job2.ns, job2.end_id, { details = true })
+    return e and #e > 0 and e[3] and e[3].virt_text and e[3].virt_text[1]
+      and type(e[3].virt_text[1][1]) == "string"
+      and e[3].virt_text[1][1]:find("Generating", 1, true) ~= nil
+  end
+  vim.wait(1000, job2_generating, 10)
+  assert(job2_generating(),
+    "busy_second_submit_queues: second stream job must repaint to Generating")
+
+  -- Release the second job at the end of the case.
   env.captured_opts.on_complete(nil)
   vim.wait(50)
   restore_env(env)
@@ -235,10 +277,13 @@ case("sync_raise_clears_busy", function()
   restore_env(env)
 end)
 
-case("busy_race_second_submit_refused", function()
-  -- WR-03: async-UI race — BOTH prompts open before either submits (the
-  -- entry guard cannot see the un-submitted first job). The second submit
-  -- must be refused by the in-callback busy re-check.
+case("busy_race_second_submit_queues", function()
+  -- WR-03 race structure KEPT: async-UI race — BOTH prompts open before
+  -- either submits (the entry guard cannot see the un-submitted first job).
+  -- SEMANTIC BREAK (Phase 4 vs Phase 3): the second submit now QUEUES — it
+  -- was refused in Phase 3 (the Phase 3 race case refused it). Migrated in
+  -- place — fail-able against BOTH regressions: a return to refusal (create/WARN
+  -- assertions) and a concurrent double-run (generate_calls assertion).
   local env = fresh_env("first")  -- generate stub does NOT fire on_complete
   local pending = {}
   vim.ui.input = function(opts, cb)
@@ -247,28 +292,242 @@ case("busy_race_second_submit_refused", function()
   end
   env.ui.start(env.config)
   env.ui.start(env.config)
-  assert(#pending == 2, "busy_race_second_submit_refused: both prompts must open before either submits")
+  assert(#pending == 2, "busy_race_second_submit_queues: both prompts must open before either submits")
 
-  pending[1]("first")  -- first submit claims busy and generates
-  assert(env.generate_calls == 1, "busy_race_second_submit_refused: first submit must generate")
+  pending[1]("first")  -- first submit runs immediately
+  assert(env.generate_calls == 1, "busy_race_second_submit_queues: first submit must generate")
 
-  pending[2]("second")  -- second submit arrives while busy: must be refused
+  pending[2]("second")  -- second submit arrives while busy: QUEUES
   assert(env.generate_calls == 1,
-    "busy_race_second_submit_refused: second submit must NOT generate (busy re-check), got generate_calls=" .. env.generate_calls)
-  assert(env.create_calls == 1,
-    "busy_race_second_submit_refused: second submit must not create a stream region, got create_calls=" .. env.create_calls)
+    "busy_race_second_submit_queues: second submit must NOT start while first runs, got generate_calls=" .. env.generate_calls)
+  assert(env.create_calls == 2,
+    "busy_race_second_submit_queues: second submit must create a queued stream region, got create_calls=" .. env.create_calls)
 
-  local warned = false
   for _, n in ipairs(env.notify_log) do
-    if type(n.msg) == "string" and n.msg:find("already generating", 1, true) and n.level == vim.log.levels.WARN then
-      warned = true
-    end
+    assert(not (type(n.msg) == "string" and n.msg:find("already generating", 1, true)),
+      "busy_race_second_submit_queues: queueing must not notify 'already generating'")
   end
-  assert(warned, "busy_race_second_submit_refused: must notify already generating at WARN level")
 
-  -- Release the first job at the end of the case.
+  -- Complete the first job: the queued second must run.
+  env.captured_opts.on_complete(nil)
+  vim.wait(1000, function() return env.generate_calls == 2 end, 10)
+  assert(env.generate_calls == 2,
+    "busy_race_second_submit_queues: second must run after the first completes")
+
+  -- Release the second job at the end of the case.
   env.captured_opts.on_complete(nil)
   vim.wait(50)
+  restore_env(env)
+end)
+
+case("queued_pending_indicator", function()
+  -- QUEUE-01 pending indicator: the queued anchor paints "Queued" until its
+  -- turn, then repaints "Generating". Case tail holds the third-submit
+  -- queueing assertion (NOT in sync_raise_clears_busy).
+  local env = fresh_env("one")
+  env.ui.start(env.config)
+  local job1 = env.job
+  env.scripted_input = "two"
+  env.ui.start(env.config)
+  local job2 = env.job
+  assert(env.generate_calls == 1, "queued_pending_indicator: only the first job runs")
+  assert(env.create_calls == 2, "queued_pending_indicator: two anchors must exist")
+
+  local function vtext(job)
+    local e = vim.api.nvim_buf_get_extmark_by_id(job.buf, job.ns, job.end_id, { details = true })
+    if e and #e > 0 and e[3] and e[3].virt_text and e[3].virt_text[1] then
+      return e[3].virt_text[1][1], e[3].virt_text[1][2]
+    end
+    return nil, nil
+  end
+  vim.wait(1000, function()
+    local t1, t2 = vtext(job1), vtext(job2)
+    return t1 and t1:find("Generating", 1, true) and t2 and t2:find("Queued", 1, true)
+  end, 10)
+  local t1, h1 = vtext(job1)
+  local t2, h2 = vtext(job2)
+  assert(t1 and t1:find("Generating", 1, true),
+    "queued_pending_indicator: first end mark must show Generating")
+  assert(h1 == "Comment", "queued_pending_indicator: Generating painted with Comment hl")
+  assert(t2 and t2:find("Queued", 1, true),
+    "queued_pending_indicator: second end mark must show the Queued pending indicator")
+  assert(h2 == "Comment", "queued_pending_indicator: Queued painted with Comment hl")
+
+  -- Complete the first: the second repaints to Generating.
+  env.captured_opts.on_complete(nil)
+  vim.wait(1000, function()
+    local t = vtext(job2)
+    return env.generate_calls == 2 and t and t:find("Generating", 1, true)
+  end, 10)
+  assert(env.generate_calls == 2, "queued_pending_indicator: second starts after first completes")
+  local t2b = vtext(job2)
+  assert(t2b and t2b:find("Generating", 1, true),
+    "queued_pending_indicator: second end mark must repaint to Generating")
+
+  -- THIRD submit while the second runs: prompt opens, third queues.
+  env.scripted_input = "three"
+  env.ui.start(env.config)
+  local job3 = env.job
+  assert(env.input_calls == 3, "queued_pending_indicator: third prompt must open")
+  assert(env.generate_calls == 2, "queued_pending_indicator: third must NOT start while second runs")
+  local t3 = vtext(job3)
+  assert(t3 and t3:find("Queued", 1, true),
+    "queued_pending_indicator: third end mark must show the Queued pending indicator")
+
+  -- Complete the second: the third starts and repaints Generating.
+  env.captured_opts.on_complete(nil)
+  vim.wait(1000, function() return env.generate_calls == 3 end, 10)
+  assert(env.generate_calls == 3, "queued_pending_indicator: third starts after second completes")
+  vim.wait(1000, function()
+    local t = vtext(job3)
+    return t and t:find("Generating", 1, true)
+  end, 10)
+  local t3b = vtext(job3)
+  assert(t3b and t3b:find("Generating", 1, true),
+    "queued_pending_indicator: third end mark must repaint to Generating")
+
+  -- Release the third job at the end of the case.
+  env.captured_opts.on_complete(nil)
+  vim.wait(50)
+  restore_env(env)
+end)
+
+case("sequential_second_starts_after_first", function()
+  -- QUEUE-01 strict sequencing: red on any overlap of two generations.
+  local env = fresh_env("one")
+  env.ui.start(env.config)
+  env.scripted_input = "two"
+  env.ui.start(env.config)
+  assert(env.generate_calls == 1, "sequential_second_starts_after_first: only first starts")
+  vim.wait(50)
+  assert(env.generate_calls == 1,
+    "sequential_second_starts_after_first: second must NOT start while first is in flight")
+  env.captured_opts.on_complete(nil)
+  vim.wait(1000, function() return env.generate_calls == 2 end, 10)
+  assert(env.generate_calls == 2,
+    "sequential_second_starts_after_first: second must start after first completes")
+  env.captured_opts.on_complete(nil)
+  vim.wait(50)
+  restore_env(env)
+end)
+
+case("cancel_running_keeps_partial", function()
+  -- GEN-05: cancelling the running job keeps its partial output; the job
+  -- terminates "cancelled".
+  local env = fresh_env("one")
+  env.ui.start(env.config)
+  assert(env.generate_calls == 1, "cancel_running_keeps_partial: job must start")
+  env.captured_opts.on_lines({ "local a = 1" })
+  vim.wait(1000, function()
+    return vim.tbl_contains(vim.api.nvim_buf_get_lines(env.buf, 0, -1, false), "local a = 1")
+  end, 10)
+
+  env.ui.cancel()
+  assert(env.cancel_calls == 1,
+    "cancel_running_keeps_partial: handle.cancel must be observed, got cancel_calls=" .. tostring(env.cancel_calls))
+  -- Simulate the real client: kill -> on_complete(nil).
+  env.captured_opts.on_complete(nil)
+  vim.wait(50)
+
+  local lines = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+  assert(vim.tbl_contains(lines, "local a = 1"),
+    "cancel_running_keeps_partial: partial output must be kept (GEN-05)")
+  assert(env.queue:get(1) and env.queue:get(1).status == "cancelled",
+    "cancel_running_keeps_partial: job terminal status must be cancelled")
+  restore_env(env)
+end)
+
+case("cancel_all_drains_zero_change", function()
+  -- QUEUE-02 / T-04-12: cancel_all keeps the running job's partial but the
+  -- drained queued job produces ZERO buffer change and clears its indicator.
+  local env = fresh_env("one")
+  env.ui.start(env.config)
+  local job1 = env.job
+  local opts1 = env.captured_opts
+  env.scripted_input = "two"
+  env.ui.start(env.config)
+  local job2 = env.job
+  assert(env.generate_calls == 1, "cancel_all_drains_zero_change: only first runs")
+  assert(env.create_calls == 2, "cancel_all_drains_zero_change: two anchors must exist")
+
+  opts1.on_lines({ "-- partial-one" })
+  vim.wait(1000, function()
+    return vim.tbl_contains(vim.api.nvim_buf_get_lines(env.buf, 0, -1, false), "-- partial-one")
+  end, 10)
+  local before = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+  local tick = vim.api.nvim_buf_get_changedtick(env.buf)
+  assert(#before == #env.original_lines + 1,
+    "cancel_all_drains_zero_change: partial line must be the only insertion")
+
+  env.ui.cancel_all()
+  -- Simulate the real client: the running job's kill -> on_complete(nil).
+  opts1.on_complete(nil)
+  vim.wait(100)
+
+  local after = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+  assert(vim.deep_equal(after, before),
+    "cancel_all_drains_zero_change: buffer must be byte-identical after the drain")
+  assert(vim.api.nvim_buf_get_changedtick(env.buf) == tick,
+    "cancel_all_drains_zero_change: changedtick must not move (zero buffer change)")
+  -- Exactly original lines + the first job's partial at its anchor (row 1).
+  local expected = { env.original_lines[1], "-- partial-one", env.original_lines[2], env.original_lines[3] }
+  assert(vim.deep_equal(after, expected),
+    "cancel_all_drains_zero_change: buffer must be originals + first-job partial only")
+
+  -- The drained job's end-mark virt_text must be cleared (no "Queued" left).
+  local e2 = vim.api.nvim_buf_get_extmark_by_id(job2.buf, job2.ns, job2.end_id, { details = true })
+  local has_queued = e2 and #e2 > 0 and e2[3] and e2[3].virt_text and e2[3].virt_text[1]
+    and type(e2[3].virt_text[1][1]) == "string"
+    and e2[3].virt_text[1][1]:find("Queued", 1, true) ~= nil
+  assert(not has_queued,
+    "cancel_all_drains_zero_change: drained job's Queued indicator must be cleared")
+  assert(env.queue:get(1) and env.queue:get(1).status == "cancelled",
+    "cancel_all_drains_zero_change: running job must terminate cancelled")
+  assert(env.queue:get(2) and env.queue:get(2).status == "cancelled",
+    "cancel_all_drains_zero_change: drained job must terminate cancelled")
+  restore_env(env)
+end)
+
+case("undo_block_per_job", function()
+  -- QUEUE-02 undo independence: one generation = one undo block; a single
+  -- `u` must remove ONLY the second job's lines. Red in BOTH directions —
+  -- joined blocks eat the first job's lines; split blocks leave j2-b behind.
+  local env = fresh_env("job-one")
+  env.ui.start(env.config)
+  local opts1 = env.captured_opts
+  opts1.on_lines({ "-- j1-a" })
+  vim.wait(50)  -- land as its own flush so the next append exercises undojoin
+  opts1.on_lines({ "-- j1-b" })
+  vim.wait(50)
+  opts1.on_complete(nil)
+  vim.wait(50)
+
+  env.scripted_input = "job-two"
+  env.ui.start(env.config)
+  local opts2 = env.captured_opts
+  opts2.on_lines({ "-- j2-a" })
+  vim.wait(50)
+  opts2.on_lines({ "-- j2-b" })
+  vim.wait(50)
+  opts2.on_complete(nil)
+  vim.wait(50)
+
+  local all = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+  assert(vim.tbl_contains(all, "-- j1-a") and vim.tbl_contains(all, "-- j1-b"),
+    "undo_block_per_job: first job lines must be present")
+  assert(vim.tbl_contains(all, "-- j2-a") and vim.tbl_contains(all, "-- j2-b"),
+    "undo_block_per_job: second job lines must be present")
+
+  vim.cmd("normal! u")
+  local after = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+  assert(vim.tbl_contains(after, "-- j1-a") and vim.tbl_contains(after, "-- j1-b"),
+    "undo_block_per_job: a single u must NOT remove the first job's lines")
+  assert(not vim.tbl_contains(after, "-- j2-a") and not vim.tbl_contains(after, "-- j2-b"),
+    "undo_block_per_job: a single u must remove BOTH second-job lines")
+  for _, want in ipairs(env.original_lines) do
+    assert(vim.tbl_contains(after, want),
+      "undo_block_per_job: original lines must survive the undo")
+  end
   restore_env(env)
 end)
 
@@ -281,14 +540,10 @@ for _, name in ipairs(REQUIRED) do
 end
 
 local failures = {}
-local executed = 0
 for _, c in ipairs(cases) do
-  if not (skip_busy and c.name:match("^busy_")) then
-    executed = executed + 1
-    local ok, err = pcall(c.fn)
-    if not ok then
-      failures[#failures + 1] = c.name .. ": " .. tostring(err)
-    end
+  local ok, err = pcall(c.fn)
+  if not ok then
+    failures[#failures + 1] = c.name .. ": " .. tostring(err)
   end
 end
 if #failures > 0 then
@@ -297,4 +552,4 @@ if #failures > 0 then
   end
   error("ui_spec: " .. #failures .. " case(s) failed: " .. table.concat(failures, "; "))
 end
-print("ui_spec: all " .. executed .. " cases passed")
+print("ui_spec: all " .. #cases .. " cases passed")

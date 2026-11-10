@@ -36,6 +36,12 @@ end
 local q = require("vim_module.queue").new({
   start = function(record, done)
     -- record = { stream_job, buf, row, config, prompt }
+    -- QUEUE-02: close the undo block before this job's first append so ONE
+    -- generation == ONE undo block. undo.txt (undo-break): setting 'undolevels'
+    -- closes the block even when the value is unchanged. Applied to the job's
+    -- own buffer (it may not be current). Safe here: with done() deferred out
+    -- of fast events (see on_complete), start always runs on the main loop.
+    vim.bo[record.buf].undolevels = vim.bo[record.buf].undolevels
     paint_status(record.stream_job, " Generating... ", "Comment")
     local ok, handle, err = pcall(require("vim_module.client").generate, {
       config = record.config,
@@ -57,7 +63,11 @@ local q = require("vim_module.queue").new({
             vim.notify("vim-module: " .. complete_err, vim.log.levels.ERROR)
           end)
         end
-        done(record.done_status)
+        -- Deferred: on_complete runs in a FAST EVENT (vim.system on_exit) and
+        -- done() pumps the NEXT job's start (client.generate's vim.fn calls,
+        -- extmarks, undolevels) — all E5560 in fast events. The queue contract
+        -- allows done "eventually"; one-at-a-time ordering still holds.
+        vim.schedule(function() done(record.done_status) end)
       end,
     })
     if not ok then
