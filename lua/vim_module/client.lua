@@ -373,7 +373,11 @@ function M.generate(opts)
           or ("HTTP " .. tostring(status or out.code))
         if status == 429 then
           local retry = M.parse_retry_after(dump_path)
-          if retry then err_msg = err_msg .. " (retry after " .. retry .. "s)" end
+          if retry then
+            -- 05-CONTEXT/05-RESEARCH locked format: "Rate limited — retry after Ns"
+            -- (em-dash —). NO auto-retry in v1: the user decides (fire-and-forget).
+            err_msg = "Rate limited — retry after " .. retry .. "s"
+          end
         end
         opts.on_complete(err_msg)
       end
