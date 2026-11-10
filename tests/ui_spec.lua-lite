@@ -1,0 +1,217 @@
+local this = debug.getinfo(1, "S").source:sub(2)
+local root = this:match("^(.*)/tests/") or "."
+package.path = root .. "/lua/?.lua;" .. package.path
+
+local cases = {}
+local REQUIRED = {
+  "esc_aborts_zero_change",
+  "empty_input_aborts",
+  "error_notifies_error_level",
+  "error_paints_failure_marker",
+  "busy_refuses_second_job",
+}
+local function case(name, fn)
+  cases[#cases + 1] = { name = name, fn = fn }
+end
+
+-- Shared harness: fresh ui module state (resets the busy flag / current
+-- handle), a scratch buffer with the cursor at 0-indexed row 1, stream.create
+-- spied on the REAL stream.lua (real extmark behavior is needed for the
+-- failure-marker case), client.generate fully stubbed (zero network), and a
+-- prompt-contract vim.ui.input stub that MOVES the cursor before submit
+-- (async input UI simulation) plus a captured vim.notify.
+local function fresh_env(scripted_input, fire_in_generate)
+  local env = {}
+  env.scripted_input = scripted_input
+  env.notify_log = {}
+  env.input_calls = 0
+  env.generate_calls = 0
+  env.create_calls = 0
+  env.create_row = nil
+  env.job = nil
+  env.captured_opts = nil
+
+  env.buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_set_current_buf(env.buf)
+  env.original_lines = { "local x = 1", "local y = 2", "local z = 3" }
+  vim.api.nvim_buf_set_lines(env.buf, 0, -1, false, env.original_lines)
+  vim.api.nvim_win_set_cursor(0, { 2, 0 })  -- 1-indexed row 2 = 0-indexed row 1
+  env.tick = vim.api.nvim_buf_get_changedtick(env.buf)
+
+  env.config = {
+    model = "m",
+    api_key_env = "TEST_UI_KEY",
+    curl_bin = "/bin/curl",
+    budgets = { max_output_tokens = 100, context_tokens = 1000 },
+  }
+  vim.env.TEST_UI_KEY = "sk-ui-TEST"
+
+  env.real_stream = require("vim_module.stream")
+  env.real_create = env.real_stream.create
+  env.real_stream.create = function(buf, row, opts)
+    env.create_calls = env.create_calls + 1
+    env.create_row = row
+    env.job = env.real_create(buf, row, opts)
+    return env.job
+  end
+
+  env.real_client = package.loaded["vim_module.client"]
+  package.loaded["vim_module.client"] = {
+    generate = function(opts)
+      env.generate_calls = env.generate_calls + 1
+      env.captured_opts = opts
+      if fire_in_generate then fire_in_generate(opts) end
+      return { cancel = function() end }
+    end,
+  }
+
+  env.real_input = vim.ui.input
+  vim.ui.input = function(opts, cb)
+    env.input_calls = env.input_calls + 1
+    assert(type(opts.prompt) == "string" and #opts.prompt > 0, "prompt must be a non-empty string")
+    vim.api.nvim_win_set_cursor(0, { 3, 0 })
+    cb(env.scripted_input)
+  end
+
+  env.real_notify = vim.notify
+  vim.notify = function(msg, level)
+    env.notify_log[#env.notify_log + 1] = { msg = msg, level = level }
+  end
+
+  package.loaded["vim_module.ui"] = nil
+  env.ui = require("vim_module.ui")
+  return env
+end
+
+local function restore_env(env)
+  vim.ui.input = env.real_input
+  vim.notify = env.real_notify
+  env.real_stream.create = env.real_create
+  package.loaded["vim_module.client"] = env.real_client
+end
+
+local function assert_unchanged(env, name)
+  assert(env.create_calls == 0, name .. ": stream.create must not be called")
+  assert(env.generate_calls == 0, name .. ": client.generate must not be called")
+  local lines = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+  assert(#lines == #env.original_lines, name .. ": buffer line count must be unchanged")
+  for i, want in ipairs(env.original_lines) do
+    assert(lines[i] == want, name .. ": buffer line " .. i .. " must be unchanged")
+  end
+  assert(vim.api.nvim_buf_get_changedtick(env.buf) == env.tick, name .. ": changedtick must be unchanged")
+end
+
+case("esc_aborts_zero_change", function()
+  local env = fresh_env(nil)  -- Esc: the input callback receives nil
+  env.ui.start(env.config)
+  assert_unchanged(env, "esc_aborts_zero_change")
+  restore_env(env)
+end)
+
+case("empty_input_aborts", function()
+  local env = fresh_env("")  -- Enter on empty input
+  env.ui.start(env.config)
+  assert_unchanged(env, "empty_input_aborts")
+  restore_env(env)
+end)
+
+case("error_notifies_error_level", function()
+  local env = fresh_env("do stuff", function(opts)
+    opts.on_complete("boom")
+  end)
+  env.ui.start(env.config)
+  vim.wait(1000, function() return #env.notify_log > 0 end)
+  assert(#env.notify_log == 1, "error_notifies_error_level: expected exactly one notify, got " .. #env.notify_log)
+  local n = env.notify_log[1]
+  assert(type(n.msg) == "string" and n.msg:find("boom", 1, true),
+    "error_notifies_error_level: notify msg must contain the API error")
+  assert(n.level == vim.log.levels.ERROR, "error_notifies_error_level: notify level must be ERROR")
+  restore_env(env)
+end)
+
+case("error_paints_failure_marker", function()
+  local env = fresh_env("do stuff", function(opts)
+    opts.on_complete("boom")
+  end)
+  env.ui.start(env.config)
+
+  local function marker_present()
+    local e = vim.api.nvim_buf_get_extmark_by_id(env.job.buf, env.job.ns, env.job.end_id, { details = true })
+    return e and #e > 0 and e[3] and e[3].virt_text and e[3].virt_text[1]
+      and type(e[3].virt_text[1][1]) == "string"
+      and e[3].virt_text[1][1]:find("failed", 1, true) ~= nil
+      and e[3].virt_text[1][2] == "ErrorMsg"
+  end
+  vim.wait(1000, marker_present, 10)
+  assert(marker_present(), "error_paints_failure_marker: failure virt_text must be painted on the end mark")
+  -- Settle-aware gate: stream.finish clears the status virt_text via its own
+  -- scheduled flush — a marker painted BEFORE that flush would be wiped by it.
+  -- Waiting lets the flush land; the marker must then STILL be there.
+  vim.wait(50)
+  assert(marker_present(), "error_paints_failure_marker: failure marker must survive the finish flush (settle-aware)")
+
+  local err_notify = false
+  for _, n in ipairs(env.notify_log) do
+    if n.level == vim.log.levels.ERROR and type(n.msg) == "string" and n.msg:find("boom", 1, true) then
+      err_notify = true
+    end
+  end
+  assert(err_notify, "error_paints_failure_marker: ERROR notify must fire")
+
+  -- GEN-01 anchor capture: the input stub moved the cursor to 0-indexed row 2
+  -- before submitting, so re-reading the cursor inside the input callback
+  -- would produce row 2 and fail these assertions.
+  assert(env.create_row == 1,
+    "error_paints_failure_marker: stream.create must anchor at the captured pre-prompt row (got " .. tostring(env.create_row) .. ")")
+  assert(env.captured_opts and env.captured_opts.row == 1,
+    "error_paints_failure_marker: client.generate must receive the captured pre-prompt row (got " .. tostring(env.captured_opts and env.captured_opts.row) .. ")")
+  restore_env(env)
+end)
+
+case("busy_refuses_second_job", function()
+  local env = fresh_env("first")  -- generate stub does NOT fire on_complete: job stays in flight
+  env.ui.start(env.config)
+  assert(env.generate_calls == 1, "busy_refuses_second_job: first job must start")
+  assert(env.input_calls == 1, "busy_refuses_second_job: prompt must open once")
+
+  env.scripted_input = "second"
+  env.ui.start(env.config)
+  assert(env.generate_calls == 1, "busy_refuses_second_job: second job must be refused")
+  assert(env.input_calls == 1, "busy_refuses_second_job: busy guard must return BEFORE the prompt opens")
+
+  local warned = false
+  for _, n in ipairs(env.notify_log) do
+    if type(n.msg) == "string" and n.msg:find("already generating", 1, true) and n.level == vim.log.levels.WARN then
+      warned = true
+    end
+  end
+  assert(warned, "busy_refuses_second_job: must notify already generating at WARN level")
+
+  -- Release the busy flag at the end of the case.
+  env.captured_opts.on_complete(nil)
+  vim.wait(50)
+  restore_env(env)
+end)
+
+local registered = {}
+for _, c in ipairs(cases) do registered[c.name] = true end
+for _, name in ipairs(REQUIRED) do
+  if not registered[name] then
+    error("ui_spec: required case missing: " .. name)
+  end
+end
+
+local failures = {}
+for _, c in ipairs(cases) do
+  local ok, err = pcall(c.fn)
+  if not ok then
+    failures[#failures + 1] = c.name .. ": " .. tostring(err)
+  end
+end
+if #failures > 0 then
+  for _, f in ipairs(failures) do
+    print("FAIL " .. f)
+  end
+  error("ui_spec: " .. #failures .. " case(s) failed: " .. table.concat(failures, "; "))
+end
+print("ui_spec: all " .. #cases .. " cases passed")
