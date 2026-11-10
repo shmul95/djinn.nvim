@@ -12,6 +12,7 @@ local cases = {}
 local REQUIRED = {
   "startup_loads_no_context",
   "denylist_fixture_readme_only",
+  "symlink_denylist_no_leak",
   "cache_outside_worktree",
   "stale_file_count_triggers_refresh",
   "stale_mtime_triggers_refresh",
@@ -168,6 +169,43 @@ case("denylist_fixture_readme_only", function()
   for _, p in ipairs({ ".env", "secrets/", "ignored.txt", "api_key.txt" }) do
     assert(not digest:find(p, 1, true),
       "denylist_fixture_readme_only: digest leaks path " .. p)
+  end
+end)
+
+case("symlink_denylist_no_leak", function()
+  -- CR-02: denylist bypass via symlinks — io.open/fs_stat follow links, so a
+  -- doc-shaped symlink (README.md -> .env, docs/api.md -> outside-root file)
+  -- put denied/foreign CONTENT straight into the digest. Symlinks must
+  -- contribute NOTHING: no tree line, no doc text.
+  local context = ctx()
+  local base = vim.fn.tempname()
+  local proj = base .. "/proj"
+  vim.fn.mkdir(proj .. "/docs", "p")
+  write_file(proj .. "/.env", "leak-env-SENTINEL=1\n")
+  write_file(base .. "/outside-secret.txt", "leak-outside-SENTINEL\n")
+  write_file(proj .. "/docs/guide.md", "real-doc-SENTINEL\n")
+  assert(vim.uv.fs_symlink(proj .. "/.env", proj .. "/README.md"),
+    "symlink_denylist_no_leak: cannot create README.md -> .env symlink")
+  assert(vim.uv.fs_symlink(base .. "/outside-secret.txt", proj .. "/docs/api.md"),
+    "symlink_denylist_no_leak: cannot create docs/api.md -> outside-root symlink")
+  cleanup_roots[#cleanup_roots + 1] = base
+  fixture_roots[#fixture_roots + 1] = proj
+  -- Fixture preconditions: the symlinks are LIVE (reads follow them) and the
+  -- real doc is readable — removing the lstat guard must turn these into leaks.
+  assert_file_contains(proj .. "/README.md", "leak-env-SENTINEL", "symlink_denylist_no_leak")
+  assert_file_contains(proj .. "/docs/api.md", "leak-outside-SENTINEL", "symlink_denylist_no_leak")
+  assert_file_contains(proj .. "/docs/guide.md", "real-doc-SENTINEL", "symlink_denylist_no_leak")
+
+  local digest = context.render_digest(context.build_sync(proj))
+  assert(digest:find("real-doc-SENTINEL", 1, true),
+    "symlink_denylist_no_leak: real doc content must still land (guard must not disable doc reads)")
+  for _, leak in ipairs({ "leak-env-SENTINEL", "leak-outside-SENTINEL" }) do
+    assert(not digest:find(leak, 1, true),
+      "symlink_denylist_no_leak: digest leaks " .. leak .. " through a symlink")
+  end
+  for _, p in ipairs({ ".env", "README.md", "api.md" }) do
+    assert(not digest:find(p, 1, true),
+      "symlink_denylist_no_leak: digest leaks symlink path " .. p)
   end
 end)
 

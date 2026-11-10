@@ -149,19 +149,26 @@ local function step(state)
       -- denylist BEFORE read (belt and braces: checked at discovery too)
       if not M.is_denied(item.rel, state.ignore_pats) then
         local path = state.root .. "/" .. item.rel
-        local st = vim.uv.fs_stat(path)
-        if st ~= nil and st.mtime ~= nil and type(st.mtime.sec) == "number" then
-          if st.mtime.sec > state.max_mtime then
-            state.max_mtime = st.mtime.sec
+        -- CR-02: lstat guard — refuse symlinks entirely. io.open/fs_stat would
+        -- follow them: a README.md -> .env (or -> ~/.ssh/id_rsa) symlink puts
+        -- denied/foreign CONTENT into the digest. Symlinks contribute nothing:
+        -- no tree line, no doc read. Same for entries that vanished mid-walk.
+        local st_link = vim.uv.fs_lstat(path)
+        if st_link ~= nil and st_link.type ~= "link" then
+          local st = vim.uv.fs_stat(path)
+          if st ~= nil and st.mtime ~= nil and type(st.mtime.sec) == "number" then
+            if st.mtime.sec > state.max_mtime then
+              state.max_mtime = st.mtime.sec
+            end
           end
-        end
-        state.tree[#state.tree + 1] = item.rel
-        if is_doc(item.rel) then
-          local f = io.open(path, "r")
-          if f ~= nil then
-            local text = f:read("*a")
-            f:close()
-            state.docs[#state.docs + 1] = { path = item.rel, text = text or "" }
+          state.tree[#state.tree + 1] = item.rel
+          if is_doc(item.rel) then
+            local f = io.open(path, "r")
+            if f ~= nil then
+              local text = f:read("*a")
+              f:close()
+              state.docs[#state.docs + 1] = { path = item.rel, text = text or "" }
+            end
           end
         end
       end
