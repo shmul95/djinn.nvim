@@ -31,6 +31,7 @@ local REQUIRED = {
   "no_secrets_in_packed_prompt",
   "framing_close_tag_neutralized",
   "utf8_truncation_char_boundary",
+  "build_user_content_digest_headroom",
 }
 local function case(name, fn)
   cases[#cases + 1] = { name = name, fn = fn }
@@ -626,6 +627,33 @@ case("utf8_truncation_char_boundary", function()
   assert(dsection, "utf8_truncation_char_boundary: docs section missing")
   assert(#dsection > 0 and #dsection <= 200 * 1024 and #dsection % 3 == 0,
     "utf8_truncation_char_boundary: docs cap must cut on a char boundary, got " .. #dsection .. " bytes")
+end)
+
+case("build_user_content_digest_headroom", function()
+  -- WR-06: get_buffer_slice fills its budget greedily — for any buffer with
+  -- ~budget chars of neighborhood text the digest was ALWAYS dropped
+  -- (grounding silently vanished). The slice must reserve digest headroom.
+  local context = ctx()
+  local client = require("vim_module.client")
+  local buf = vim.api.nvim_create_buf(false, true)
+  local lines = {}
+  for i = 1, 300 do
+    lines[i] = string.format("local line%03d = %d -- neighborhood padding text", i, i)
+  end
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  -- context_tokens = 1000 -> 4000-char budget; the 300-line neighborhood
+  -- would greedily consume all of it.
+  local config = { budgets = { context_tokens = 1000, max_output_tokens = 100 } }
+  local digest = "DIGEST-HEAD-SENTINEL\n" .. string.rep("d", 500) .. "\nDIGEST-TAIL-SENTINEL"
+  local out = client.build_user_content("write a function", buf, 150, config, { digest = digest })
+  assert(#out <= 4000,
+    "build_user_content_digest_headroom: output must fit the budget, got " .. #out)
+  assert(out:find("<project_files>", 1, true),
+    "build_user_content_digest_headroom: the project_files block must be present")
+  assert(out:find("DIGEST-HEAD-SENTINEL", 1, true),
+    "build_user_content_digest_headroom: digest head must survive packing (grounding must not be starved)")
+  assert(out:find("\n\nRequest: write a function", 1, true),
+    "build_user_content_digest_headroom: request line must be intact")
 end)
 
 -- teardown + runner -----------------------------------------------------

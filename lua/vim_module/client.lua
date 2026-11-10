@@ -136,10 +136,21 @@ end
 
 function M.build_user_content(prompt, buf, row, config, pack)
   local max_chars = config.budgets.context_tokens * 4  -- ~4 chars per token heuristic
-  local slice = M.get_buffer_slice(buf, row, max_chars)
   if not pack or not pack.digest or pack.digest == "" then
+    local slice = M.get_buffer_slice(buf, row, max_chars)
     return slice .. "\n\nRequest: " .. prompt   -- EXACT Phase 3 string
   end
+  -- WR-06: reserve digest headroom BEFORE slicing — get_buffer_slice fills
+  -- its budget greedily, so any buffer with ~budget chars of neighborhood
+  -- text left pack() nothing and the digest (grounding) was silently dropped.
+  -- The reservation is bounded by half the budget, and pack() still truncates
+  -- or drops the digest first when over budget (priority: request > slice >
+  -- digest). 32 = <project_files> block overhead (15 + 17).
+  local req_part = "\n\nRequest: " .. prompt
+  local reserved = math.min(#pack.digest + 32, math.floor(max_chars / 2))
+  local slice_budget = max_chars - #req_part - reserved
+  if slice_budget < 0 then slice_budget = 0 end
+  local slice = M.get_buffer_slice(buf, row, slice_budget)
   return require("vim_module.context").pack({
     request = prompt, slice = slice, digest = pack.digest, budget_chars = max_chars,
   })
