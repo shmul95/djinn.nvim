@@ -7,9 +7,13 @@ package.path = root .. "/lua/?.lua;" .. package.path
 local client = require("vim_module.client")
 
 local cases = {}
--- Plan 01 seeds the list; Plan 03 extends it with the remaining checklist rows.
+-- Self-enforcement: one name per registered case — 17 names for 17 cases
+-- (Plan 01 seeded the list; Plan 03 extended it; 05-review WR-05 added the
+-- missing row 4, failure_matrix_429_no_retry_header, which was deletable
+-- without tripping the gate). Every checklist row is undeletable.
 local REQUIRED = {
   "telemetry_completion_notify", "telemetry_absent_noop", "failure_matrix_429",
+  "failure_matrix_429_no_retry_header",
   "failure_matrix_missing_key", "failure_matrix_401", "failure_matrix_500",
   "failure_matrix_malformed_sse", "failure_matrix_network_down",
   "progressive_landing", "cancel_kills_process_and_cleans",
