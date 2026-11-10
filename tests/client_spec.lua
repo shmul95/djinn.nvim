@@ -25,14 +25,30 @@ end
 -- Known key for hygiene assertions
 vim.env.TEST_SPEC_KEY = "sk-spec-SECRET42"
 
--- Fake vim.system harness
+-- Fake vim.system harness — mirrors the REAL contract (:h vim.system):
+-- vim.system(cmd, opts, on_exit) where on_exit is the THIRD positional arg
+-- (fun(out: vim.SystemCompleted) — one table with .code/.signal) and opts
+-- carries the stdout/stderr callbacks (fun(err, data)). opts.on_exit does
+-- NOT exist in the real API; a fake that reads it would certify a contract
+-- Neovim does not provide (see CR-01).
 local function with_fake(script, fn)
   script = script or {}
   local captured
   local killed = false
   local orig = vim.system
-  vim.system = function(cmd, opts)
-    captured = { cmd = cmd, opts = opts }
+  vim.system = function(cmd, opts, on_exit)
+    captured = { cmd = cmd, opts = opts, on_exit = on_exit }
+    -- Real curl writes --dump-header during the transfer, before exit.
+    if script.dump_headers then
+      local dp
+      for i, v in ipairs(cmd) do
+        if v == "--dump-header" then dp = cmd[i + 1] end
+      end
+      if dp then
+        local df = io.open(dp, "w")
+        if df then df:write(script.dump_headers) df:close() end
+      end
+    end
     return {
       pid = 1,
       kill = function() killed = true end,
@@ -49,20 +65,9 @@ local function with_fake(script, fn)
       end
     end,
     fire_exit = function(code, signal)
-      -- Write dump headers before exit so parse_status can read them
-      if captured and captured.cmd then
-        local dp
-        for i, v in ipairs(captured.cmd) do
-          if v == "--dump-header" then dp = captured.cmd[i + 1] end
-        end
-        if dp and script.dump_headers then
-          local df = io.open(dp, "w")
-          if df then df:write(script.dump_headers) df:close() end
-        end
-      end
-      if captured and captured.opts and captured.opts.on_exit then
-        captured.opts.on_exit(code or script.exit_code or 0, signal or 0)
-      end
+      assert(type(captured and captured.on_exit) == "function",
+        "fake: vim.system was called WITHOUT the third positional on_exit")
+      captured.on_exit({ code = code or script.exit_code or 0, signal = signal or 0 })
     end,
   }
   local ok, err = pcall(fn, fake_ctx)

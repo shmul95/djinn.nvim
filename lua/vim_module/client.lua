@@ -267,64 +267,65 @@ function M.generate(opts)
       sse.feed(parser, data)
     end
   end
+  -- on_exit is the THIRD positional arg (fun(out: vim.SystemCompleted)) —
+  -- opts.on_exit / opts.on_stdout are not vim.system fields and are
+  -- silently ignored by vim.system.
   local system_obj = vim.system(argv, {
     stdout = stdout_handler,
-    on_stdout = stdout_handler,
-    on_exit = function(code, signal)
-      sse.finish(parser)
-      local cleanup = function()
-        M.cleanup_temp_files({ header_path, body_path, dump_path })
+  }, function(out)
+    sse.finish(parser)
+    local cleanup = function()
+      M.cleanup_temp_files({ header_path, body_path, dump_path })
+    end
+    if state.cancelled then
+      -- User cancel: flush tail, no error
+      if acc.pending ~= "" then
+        local tail = stripper:filter({ acc.pending })
+        acc.pending = ""
+        if #tail > 0 then opts.on_lines(tail) end
       end
-      if state.cancelled then
-        -- User cancel: flush tail, no error
-        if acc.pending ~= "" then
-          local tail = stripper:filter({ acc.pending })
-          acc.pending = ""
-          if #tail > 0 then opts.on_lines(tail) end
-        end
-        opts.on_complete(nil)
-        cleanup()
-        return
+      opts.on_complete(nil)
+      cleanup()
+      return
+    end
+    if state.error_msg then
+      opts.on_complete(state.error_msg)
+      cleanup()
+      return
+    end
+    local status = M.parse_status(dump_path)
+    if status and status >= 200 and status < 300 then
+      -- 2xx success: flush tail through fence stripper
+      if acc.pending ~= "" then
+        local tail = stripper:filter({ acc.pending })
+        acc.pending = ""
+        if #tail > 0 then opts.on_lines(tail) end
       end
-      if state.error_msg then
-        opts.on_complete(state.error_msg)
-        cleanup()
-        return
-      end
-      local status = M.parse_status(dump_path)
-      if status and status >= 200 and status < 300 then
-        -- 2xx success: flush tail through fence stripper
-        if acc.pending ~= "" then
-          local tail = stripper:filter({ acc.pending })
-          acc.pending = ""
-          if #tail > 0 then opts.on_lines(tail) end
-        end
-        if state.stop_reason == "max_tokens" then
-          opts.on_complete("Generation truncated (max_tokens reached)")
-        elseif state.stop_reason == "refusal" then
-          -- RESEARCH.md: refusal — surface stop_details if present
-          local expl = state.stop_details and state.stop_details.explanation
-          if expl and expl ~= "" then
-            opts.on_complete("Model refused the request: " .. expl)
-          else
-            opts.on_complete("Model refused the request")
-          end
+      if state.stop_reason == "max_tokens" then
+        opts.on_complete("Generation truncated (max_tokens reached)")
+      elseif state.stop_reason == "refusal" then
+        -- RESEARCH.md: refusal — surface stop_details if present
+        local expl = state.stop_details and state.stop_details.explanation
+        if expl and expl ~= "" then
+          opts.on_complete("Model refused the request: " .. expl)
         else
-          opts.on_complete(nil)
+          opts.on_complete("Model refused the request")
         end
       else
-        -- Non-2xx: error body is plain JSON (NOT SSE)
-        local err_msg = M.parse_error_body(state.raw_stdout)
-          or ("HTTP " .. tostring(status or code))
-        if status == 429 then
-          local retry = M.parse_retry_after(dump_path)
-          if retry then err_msg = err_msg .. " (retry after " .. retry .. "s)" end
-        end
-        opts.on_complete(err_msg)
+        opts.on_complete(nil)
       end
-      cleanup()
-    end,
-  })
+    else
+      -- Non-2xx: error body is plain JSON (NOT SSE)
+      local err_msg = M.parse_error_body(state.raw_stdout)
+        or ("HTTP " .. tostring(status or out.code))
+      if status == 429 then
+        local retry = M.parse_retry_after(dump_path)
+        if retry then err_msg = err_msg .. " (retry after " .. retry .. "s)" end
+      end
+      opts.on_complete(err_msg)
+    end
+    cleanup()
+  end)
 
   return {
     cancel = function()
