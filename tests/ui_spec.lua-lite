@@ -16,6 +16,12 @@ local REQUIRED = {
   "cancel_running_keeps_partial",
   "cancel_all_drains_zero_change",
   "undo_block_per_job",
+  "continuation_body_only_under_header",
+  "continuation_signature_stripped_header_untouched",
+  "continuation_request_word_trigger",
+  "generate_mode_unfiltered",
+  "continuation_indent_tabs",
+  "digest_passed_to_generate",
 }
 local function case(name, fn)
   cases[#cases + 1] = { name = name, fn = fn }
@@ -528,6 +534,171 @@ case("undo_block_per_job", function()
     assert(vim.tbl_contains(after, want),
       "undo_block_per_job: original lines must survive the undo")
   end
+  restore_env(env)
+end)
+
+-- CONT-01 + CTX-02 continuation/digest cases -----------------------------
+
+-- Helper: override vim.ui.input to avoid cursor out-of-range on short
+-- buffers (the harness stub moves the cursor to row 3 for GEN-01 testing;
+-- continuation buffers may be shorter).
+local function safe_input(env)
+  vim.ui.input = function(opts, cb)
+    env.input_calls = env.input_calls + 1
+    cb(env.scripted_input)
+  end
+end
+
+-- Helper: stub context.get_digest, returns restore function.
+local function stub_digest(value)
+  local real = package.loaded["vim_module.context"]
+  package.loaded["vim_module.context"] = { get_digest = function() return value end }
+  return function() package.loaded["vim_module.context"] = real end
+end
+
+case("continuation_body_only_under_header", function()
+  local restore_ctx = stub_digest("DIGEST-SENTINEL")
+  local env = fresh_env("write the rest", function(opts)
+    opts.on_lines({ "return n" })
+    opts.on_complete(nil)
+  end)
+  vim.api.nvim_buf_set_lines(env.buf, 0, -1, false, { "def fib(n):", "x = 1" })
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })  -- row 0 = header
+  vim.bo[env.buf].expandtab = true
+  vim.bo[env.buf].shiftwidth = 4
+  safe_input(env)
+  env.ui.start(env.config)
+  vim.wait(1000, function()
+    local l = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+    return #l == 3 and l[2] == "    return n"
+  end, 10)
+  local lines = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+  assert(vim.deep_equal(lines, { "def fib(n):", "    return n", "x = 1" }),
+    "continuation_body_only_under_header: expected body under header, got " .. vim.inspect(lines))
+  assert(env.create_row == 1,
+    "continuation_body_only_under_header: stream.create must anchor at header+1 (got " .. tostring(env.create_row) .. ")")
+  assert(env.captured_opts and env.captured_opts.row == 0,
+    "continuation_body_only_under_header: generate must receive the header row (got " .. tostring(env.captured_opts and env.captured_opts.row) .. ")")
+  assert(env.captured_opts and env.captured_opts.mode == "continuation",
+    "continuation_body_only_under_header: mode must be continuation")
+  restore_ctx()
+  restore_env(env)
+end)
+
+case("continuation_signature_stripped_header_untouched", function()
+  local restore_ctx = stub_digest("DIGEST-SENTINEL")
+  local env = fresh_env("write the rest", function(opts)
+    opts.on_lines({ "def fib(n):", "return n", "  def fib(n):  " })
+    opts.on_complete(nil)
+  end)
+  vim.api.nvim_buf_set_lines(env.buf, 0, -1, false, { "def fib(n):", "x = 1" })
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  vim.bo[env.buf].expandtab = true
+  vim.bo[env.buf].shiftwidth = 4
+  safe_input(env)
+  env.ui.start(env.config)
+  vim.wait(1000, function()
+    local l = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+    return #l == 3 and l[2] == "    return n"
+  end, 10)
+  local lines = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+  assert(vim.deep_equal(lines, { "def fib(n):", "    return n", "x = 1" }),
+    "continuation_signature_stripped_header_untouched: signatures must be stripped, header untouched, got " .. vim.inspect(lines))
+  assert(lines[1] == "def fib(n):",
+    "continuation_signature_stripped_header_untouched: header must be byte-identical")
+  restore_ctx()
+  restore_env(env)
+end)
+
+case("continuation_request_word_trigger", function()
+  local restore_ctx = stub_digest("DIGEST-SENTINEL")
+  local env = fresh_env("finish this", function(opts)
+    opts.on_complete(nil)
+  end)
+  vim.api.nvim_buf_set_lines(env.buf, 0, -1, false, { "x = 1", "y = 2" })
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })  -- row 0, anchor "x = 1" (NOT a header)
+  safe_input(env)
+  env.ui.start(env.config)
+  assert(env.captured_opts and env.captured_opts.mode == "continuation",
+    "continuation_request_word_trigger: request word 'finish' must trigger continuation")
+  assert(env.create_row == 1,
+    "continuation_request_word_trigger: create_row must be row+1 (got " .. tostring(env.create_row) .. ")")
+  restore_ctx()
+  restore_env(env)
+end)
+
+case("generate_mode_unfiltered", function()
+  local restore_ctx = stub_digest("DIGEST-SENTINEL")
+  local env = fresh_env("write a function", function(opts)
+    opts.on_lines({ "local q = 1" })
+    opts.on_complete(nil)
+  end)
+  vim.api.nvim_buf_set_lines(env.buf, 0, -1, false, { "x = 1", "y = 2" })
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })  -- row 0, anchor "x = 1" (NOT a header)
+  safe_input(env)
+  env.ui.start(env.config)
+  vim.wait(1000, function()
+    return vim.tbl_contains(vim.api.nvim_buf_get_lines(env.buf, 0, -1, false), "local q = 1")
+  end, 10)
+  assert(env.captured_opts and env.captured_opts.mode == nil,
+    "generate_mode_unfiltered: mode must be nil for generate (got " .. tostring(env.captured_opts and env.captured_opts.mode) .. ")")
+  assert(env.create_row == 0,
+    "generate_mode_unfiltered: create_row must equal row (no offset), got " .. tostring(env.create_row))
+  local lines = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+  assert(vim.tbl_contains(lines, "local q = 1"),
+    "generate_mode_unfiltered: on_lines must pass through verbatim (unindented)")
+  restore_ctx()
+  restore_env(env)
+end)
+
+case("continuation_indent_tabs", function()
+  local restore_ctx = stub_digest("DIGEST-SENTINEL")
+  local env = fresh_env("fill body", function(opts)
+    opts.on_lines({ "return 1", "    x = 2" })
+    opts.on_complete(nil)
+  end)
+  vim.api.nvim_buf_set_lines(env.buf, 0, -1, false, { "def f():", "pass" })
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  vim.bo[env.buf].expandtab = false
+  vim.bo[env.buf].shiftwidth = 4
+  vim.bo[env.buf].tabstop = 8
+  safe_input(env)
+  env.ui.start(env.config)
+  vim.wait(1000, function()
+    local l = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+    return #l == 4
+  end, 10)
+  local lines = vim.api.nvim_buf_get_lines(env.buf, 0, -1, false)
+  assert(lines[2] == "\treturn 1",
+    "continuation_indent_tabs: first body line must be one tab + 'return 1', got " .. vim.inspect(lines[2]))
+  assert(lines[3] == "\t\tx = 2",
+    "continuation_indent_tabs: nested line must be two tabs + 'x = 2', got " .. vim.inspect(lines[3]))
+  restore_ctx()
+  restore_env(env)
+end)
+
+case("digest_passed_to_generate", function()
+  local restore_ctx = stub_digest("DIGEST-SENTINEL")
+  local env = fresh_env("do stuff", function(opts)
+    opts.on_complete(nil)
+  end)
+  env.ui.start(env.config)
+  local opts1 = env.captured_opts
+  assert(opts1 and opts1.digest == "DIGEST-SENTINEL",
+    "digest_passed_to_generate: digest must be passed through (got " .. tostring(opts1 and opts1.digest) .. ")")
+  vim.wait(100)
+
+  -- Stub returns nil: digest must be nil in opts.
+  restore_ctx()
+  restore_ctx = stub_digest(nil)
+  env.scripted_input = "more stuff"
+  env.ui.start(env.config)
+  local opts2 = env.captured_opts
+  assert(opts2 and opts2.digest == nil,
+    "digest_passed_to_generate: nil digest must pass through as nil (got " .. tostring(opts2 and opts2.digest) .. ")")
+  vim.wait(50)
+
+  restore_ctx()
   restore_env(env)
 end)
 

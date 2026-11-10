@@ -2,6 +2,74 @@
 
 local M = {}
 
+-- CONT-01: continuation trigger words (request-text fallback)
+local CONT_REQUEST_WORDS = { "the rest", "finish", "complete", "continue" }
+
+local function is_header_shape(line)
+  local t = vim.trim(line)
+  if t == "" then return false end
+  if t:sub(-1) == ":" then return true end            -- python/ruby def/class:
+  if t:match("^fn%s+.*{%s*$") then return true end     -- rust fn ... {
+  if t:match("^.*%)%s*{%s*$") then return true end     -- js/c ... ) {
+  return false
+end
+
+local function is_continuation_request(request)
+  local lower = request:lower()
+  for _, w in ipairs(CONT_REQUEST_WORDS) do
+    if lower:find(w, 1, true) then return true end
+  end
+  return false
+end
+
+-- CONT-01 continuation post-filter: body-only lines under the header with
+-- indent normalization (header indent + one shiftwidth, expandtab respected).
+-- Defensive signature-strip: lines trimmed-identical to the header are dropped.
+-- Returns a filter(lines) -> lines function; identity for generate mode.
+local function make_continuation_filter(buf, header_line)
+  local trimmed_header = vim.trim(header_line)
+  local header_indent = header_line:match("^[ \t]*") or ""
+  local ts = vim.bo[buf].tabstop > 0 and vim.bo[buf].tabstop or 8
+  local sw = vim.bo[buf].shiftwidth
+  if sw == 0 then sw = ts end
+  local level = vim.bo[buf].expandtab and string.rep(" ", sw) or "\t"
+  local target = header_indent .. level
+  local base_width = nil  -- indent WIDTH (visual columns: tab = ts) of first non-blank body line
+  local function width_of(line)
+    local ind = line:match("^[ \t]*") or ""
+    local w = 0
+    for i = 1, #ind do
+      if ind:sub(i, i) == "\t" then w = w + ts - (w % ts) else w = w + 1 end
+    end
+    return w
+  end
+  return function(lines)
+    local out = {}
+    for _, line in ipairs(lines) do
+      if vim.trim(line) == trimmed_header then
+        goto continue  -- defensive signature-strip (trimmed-identical to header)
+      end
+      if line:match("^%s*$") then
+        out[#out + 1] = line
+        goto continue
+      end
+      local w = width_of(line)
+      if base_width == nil then base_width = w end
+      local rel = math.max(0, w - base_width)
+      local body = line:match("^[ \t]*(.*)$") or line
+      local rel_indent
+      if vim.bo[buf].expandtab then
+        rel_indent = string.rep(" ", rel)
+      else
+        rel_indent = string.rep("\t", math.floor(rel / sw)) .. string.rep(" ", rel % sw)
+      end
+      out[#out + 1] = target .. rel_indent .. body
+      ::continue::
+    end
+    return out
+  end
+end
+
 -- Queue-backed runner (replaces the Phase 3 busy flag): firing while busy
 -- QUEUES the request (no refusal). Records map queue ids to their stream
 -- bookkeeping; running_record tracks the job currently in flight (via
@@ -48,8 +116,10 @@ local q = require("vim_module.queue").new({
       prompt = record.prompt,
       buf = record.buf,
       row = record.row,
+      digest = record.digest,
+      mode = record.mode,
       on_lines = function(lines)
-        require("vim_module.stream").enqueue(record.stream_job, lines)
+        require("vim_module.stream").enqueue(record.stream_job, record.filter and record.filter(lines) or lines)
       end,
       on_complete = function(complete_err)
         -- FAST EVENT: stream.finish is safe (self-scheduling); editor work in
@@ -122,14 +192,28 @@ function M.start(config)
       return
     end
 
+    -- CONT-01 mode detection: header-shaped anchor OR request-word trigger.
+    local anchor_line = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ""
+    local mode = (is_header_shape(anchor_line) or is_continuation_request(input)) and "continuation" or nil
+
+    -- CONT-01: header NEVER rewritten — body inserted BELOW it (row + 1).
+    local insert_row = mode == "continuation" and (row + 1) or row
+
+    -- CTX-01: lazy digest — first request fetches/builds, nil on cold cache.
+    local digest = require("vim_module.context").get_digest(vim.fn.getcwd())
+
     -- Create the generation region at the CAPTURED buf/row (not re-read from
     -- the cursor here — it may have moved during the prompt). The "Queued"
     -- pending indicator is painted at creation for EVERY submit — if the
     -- queue was idle the job starts immediately and on_transition repaints
     -- "Generating..." (settle-aware via paint_status).
     local stream = require("vim_module.stream")
-    local job = stream.create(buf, row, { status_text = " Queued " })
-    local record = { stream_job = job, buf = buf, row = row, config = config, prompt = input }
+    local job = stream.create(buf, insert_row, { status_text = " Queued " })
+    local filter = mode == "continuation" and make_continuation_filter(buf, anchor_line) or nil
+    local record = {
+      stream_job = job, buf = buf, row = row, config = config, prompt = input,
+      mode = mode, digest = digest, filter = filter,
+    }
     local id = q:submit(record)
     records[id] = record
   end)
