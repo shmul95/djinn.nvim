@@ -130,19 +130,32 @@ local function step(state)
     local item = table.remove(state.work, 1)
     n = n + 1
     if item.dir then
-      local dir_path = item.rel == "" and state.root or (state.root .. "/" .. item.rel)
-      local handle = vim.uv.fs_scandir(dir_path)
+      -- WR-10: the dirent loop is BOUNDED by the remaining chunk budget — a
+      -- wide directory (monorepo root, generated dir with 50k entries) must
+      -- never be drained inside one scheduled callback. The live scandir
+      -- cursor is re-enqueued at the head to resume this directory on the
+      -- next step (true yield-every-N).
+      local handle = item.cursor
+      if handle == nil then
+        local dir_path = item.rel == "" and state.root or (state.root .. "/" .. item.rel)
+        handle = vim.uv.fs_scandir(dir_path)
+      end
       if handle ~= nil then
-        while true do
+        while n < state.chunk do
           local name, typ = vim.uv.fs_scandir_next(handle)
           if name == nil then
+            handle = nil
             break
           end
+          n = n + 1
           local rel = item.rel == "" and name or (item.rel .. "/" .. name)
           state.file_count = state.file_count + 1
           if not M.is_denied(rel, state.ignore_pats) then
             state.work[#state.work + 1] = { rel = rel, dir = (typ == "directory") }
           end
+        end
+        if handle ~= nil then
+          table.insert(state.work, 1, { rel = item.rel, dir = true, cursor = handle })
         end
       end
     else

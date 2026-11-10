@@ -23,6 +23,7 @@ local REQUIRED = {
   "render_caps",
   "gitignore_pattern_parse",
   "walk_chunked_yields",
+  "walk_wide_dir_bounded_steps",
   "pack_fits_no_truncation",
   "pack_digest_truncated_tail_first",
   "pack_request_never_truncated",
@@ -481,6 +482,59 @@ case("walk_chunked_yields", function()
     if p == "README.md" then listed = true end
   end
   assert(listed, "walk_chunked_yields: manifest tree must list README.md")
+end)
+
+case("walk_wide_dir_bounded_steps", function()
+  -- WR-10: a single wide directory drained ALL dirents in one scheduled
+  -- callback (the chunk budget counted work items only). The dirent loop
+  -- must be bounded by the remaining chunk budget and resume across steps.
+  local context = ctx()
+  local base = vim.fn.tempname()
+  local proj = base .. "/proj"
+  vim.fn.mkdir(proj, "p")
+  for i = 1, 8 do
+    write_file(proj .. "/f" .. i .. ".txt", "f" .. i .. "-SENTINEL\n")
+  end
+  cleanup_roots[#cleanup_roots + 1] = base
+  fixture_roots[#fixture_roots + 1] = proj
+
+  -- Count fs_scandir_next calls per scheduled step (chunk = 2).
+  local orig_next = vim.uv.fs_scandir_next
+  local per_step = 0
+  local worst_step = 0
+  vim.uv.fs_scandir_next = function(handle)
+    per_step = per_step + 1
+    return orig_next(handle)
+  end
+  local queue = {}
+  local orig_schedule = vim.schedule
+  vim.schedule = function(fn)
+    queue[#queue + 1] = fn
+    return true
+  end
+  local got
+  local ok, err = pcall(function()
+    context.walk(proj, function(m) got = m end, 2)
+    local hops = 0
+    while #queue > 0 do
+      local fn = table.remove(queue, 1)
+      per_step = 0
+      fn()
+      hops = hops + 1
+      if per_step > worst_step then worst_step = per_step end
+    end
+    assert(got ~= nil, "walk_wide_dir_bounded_steps: on_done never fired while draining steps")
+    assert(hops >= 3,
+      "walk_wide_dir_bounded_steps: a wide directory must yield across steps, got " .. hops .. " hops")
+    assert(worst_step <= 2,
+      "walk_wide_dir_bounded_steps: no step may drain more than chunk dirents, got " .. worst_step)
+  end)
+  vim.schedule = orig_schedule
+  vim.uv.fs_scandir_next = orig_next
+  assert(ok, "walk_wide_dir_bounded_steps: " .. tostring(err))
+  assert(got and #got.tree == 8,
+    "walk_wide_dir_bounded_steps: manifest must list all 8 files, got " ..
+    tostring(got and #got.tree))
 end)
 
 -- packing (CTX-02) + prompt-assembly cases -------------------------------
