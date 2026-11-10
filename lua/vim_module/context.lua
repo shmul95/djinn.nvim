@@ -314,6 +314,40 @@ function M.cache_path(root)
   return vim.fn.stdpath("cache") .. "/vim-module/" .. vim.fn.sha256(root) .. ".json"
 end
 
+-- WR-05: schema validation — a corrupt or tampered cache must degrade to
+-- "absent" (cold rebuild), never raise on the request path. render_digest
+-- indexes manifest.tree with # and get_digest runs un-pcall'd from the ui
+-- input callback, so a bad shape must be rejected right here.
+local function valid_manifest(m)
+  if type(m) ~= "table" then
+    return false
+  end
+  if type(m.file_count) ~= "number" or type(m.max_mtime) ~= "number" then
+    return false
+  end
+  if m.tree_hash ~= nil and type(m.tree_hash) ~= "number" then
+    return false
+  end
+  if type(m.tree) ~= "table" then
+    return false
+  end
+  for i = 1, #m.tree do
+    if type(m.tree[i]) ~= "string" then
+      return false
+    end
+  end
+  if type(m.docs) ~= "table" then
+    return false
+  end
+  for i = 1, #m.docs do
+    local d = m.docs[i]
+    if type(d) ~= "table" or type(d.path) ~= "string" or type(d.text) ~= "string" then
+      return false
+    end
+  end
+  return true
+end
+
 function M.load_cache(root)
   local f = io.open(M.cache_path(root), "r")
   if f == nil then
@@ -325,7 +359,7 @@ function M.load_cache(root)
     return nil
   end
   local ok, decoded = pcall(vim.json.decode, text)
-  if not ok or type(decoded) ~= "table" then
+  if not ok or not valid_manifest(decoded) then
     return nil
   end
   return decoded

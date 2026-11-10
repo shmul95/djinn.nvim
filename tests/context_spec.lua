@@ -15,6 +15,7 @@ local REQUIRED = {
   "symlink_denylist_no_leak",
   "cache_outside_worktree",
   "cache_written_0600",
+  "tampered_cache_rebuilds_no_raise",
   "stale_file_count_triggers_refresh",
   "stale_mtime_triggers_refresh",
   "cold_get_digest_nonblocking",
@@ -236,6 +237,33 @@ case("cache_written_0600", function()
   assert(st.mode % 512 == 384,
     "cache_written_0600: cache must be mode 0600 (384), got "
       .. string.format("%o", st.mode % 512))
+end)
+
+case("tampered_cache_rebuilds_no_raise", function()
+  -- WR-05: a corrupt/tampered cache must degrade to a rebuild — never raise
+  -- on the request path (get_digest runs un-pcall'd from the ui callback).
+  local context = ctx()
+  local proj = make_fixture()
+  context.build_sync(proj)
+  assert(context.load_cache(proj) ~= nil,
+    "tampered_cache_rebuilds_no_raise: precondition — fresh build_sync cache must load")
+  -- The exact hostile shape from the review: tree is a number -> render_digest
+  -- would raise "attempt to get length of local 'tree'".
+  write_file(context.cache_path(proj), '{"file_count":1,"max_mtime":1,"tree":5}')
+  assert(context.load_cache(proj) == nil,
+    "tampered_cache_rebuilds_no_raise: hostile shape must be rejected by load_cache")
+  local ok, r = pcall(context.get_digest, proj)
+  assert(ok, "tampered_cache_rebuilds_no_raise: get_digest must not raise on a tampered cache, got: " .. tostring(r))
+  assert(r == nil,
+    "tampered_cache_rebuilds_no_raise: tampered cache must be treated as absent (cold semantics), got " .. tostring(r))
+  local rebuilt = vim.wait(2000, function()
+    local c = context.load_cache(proj)
+    return c ~= nil and c.file_count == 6
+  end)
+  assert(rebuilt, "tampered_cache_rebuilds_no_raise: cache must be rebuilt after tampering")
+  local ok2, r2 = pcall(context.get_digest, proj)
+  assert(ok2 and type(r2) == "string" and r2:find("README.md", 1, true),
+    "tampered_cache_rebuilds_no_raise: warm get_digest must serve the rebuilt digest")
 end)
 
 case("stale_file_count_triggers_refresh", function()
