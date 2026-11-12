@@ -18,7 +18,7 @@ local REQUIRED = {
   "failure_matrix_malformed_sse", "failure_matrix_network_down",
   "progressive_landing", "cancel_kills_process_and_cleans",
   "key_hygiene_static", "cold_start_body_only_requires", "cited_proofs_exist",
-  "readme_options_sync", "readme_manual_steps_and_version", "packaging_verify_only",
+  "readme_options_sync", "readme_no_key_literals", "packaging_verify_only",
 }
 local function case(name, fn)
   cases[#cases + 1] = { name = name, fn = fn }
@@ -879,32 +879,21 @@ case("readme_options_sync", function()
     "readme_options_sync: want exactly 9 option rows in README, got " .. row_count)
 end)
 
--- 16. readme_manual_steps_and_version (CFG-03): manual steps section present
--- with publish + switch + Version 0.1.0; no key-shaped literals in README.
-case("readme_manual_steps_and_version", function()
+-- 16. readme_no_key_literals (CFG-03): no key-shaped literals in README.
+-- The old manual-steps/version assertions were retired after the project
+-- went live (repo published, host switched) and the README was rewritten.
+case("readme_no_key_literals", function()
   local readme = read_file(root .. "/README.md")
-  assert(readme, "readme_manual_steps_and_version: cannot read README.md")
-  local has_manual_heading = false
-  for line in readme:gmatch("[^\n]+") do
-    if line:match("^## Manual steps") then has_manual_heading = true break end
-  end
-  assert(has_manual_heading,
-    "readme_manual_steps_and_version: README missing '## Manual steps' heading")
-  assert(readme:find("gh repo create", 1, true),
-    "readme_manual_steps_and_version: README missing 'gh repo create' (publish step)")
-  assert(readme:find("home-manager switch", 1, true),
-    "readme_manual_steps_and_version: README missing 'home-manager switch' (switch step)")
-  assert(readme:find("**Version 0.1.0**", 1, true),
-    "readme_manual_steps_and_version: README missing '**Version 0.1.0**'")
+  assert(readme, "readme_no_key_literals: cannot read README.md")
   -- WR-03: real keys are dash-shaped (sk-ant-api03-...) — the old
   -- sk%-[A-Za-z0-9]+ truncated at the first dash ("sk-ant", 6 chars, passed
   -- #m < 11). Scan dash-inclusive runs and ban the sk-ant prefix outright.
   local KEY_PAT = "sk%-[A-Za-z0-9_%-]+"
   assert(not readme:find("sk-ant", 1, true),
-    "readme_manual_steps_and_version: sk-ant literal in README")
+    "readme_no_key_literals: sk-ant literal in README")
   for m in readme:gmatch(KEY_PAT) do
     assert(#m < 11,
-      "readme_manual_steps_and_version: key-shaped literal in README: " .. m)
+      "readme_no_key_literals: key-shaped literal in README: " .. m)
   end
   -- WR-03 seeded-red self-check (fixture literal only — NEVER a real key):
   -- the pattern must flag a realistic sk-ant-api03 shape. Truncating KEY_PAT
@@ -915,7 +904,7 @@ case("readme_manual_steps_and_version", function()
     if #m >= 11 then flagged = true end
   end
   assert(flagged,
-    "readme_manual_steps_and_version: key-shape pattern misses realistic sk-ant-api03 keys (WR-03 self-check)")
+    "readme_no_key_literals: key-shape pattern misses realistic sk-ant-api03 keys (WR-03 self-check)")
 end)
 
 -- 17. packaging_verify_only (T-05-08): flake.nix/home-manager.nix byte-untouched

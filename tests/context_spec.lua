@@ -652,7 +652,7 @@ case("system_prompt_untrusted_framing", function()
   vim.bo[buf].shiftwidth = 2
   vim.bo[buf].expandtab = true
   local client = require("djinn.client")
-  local frozen = "You write complete, self-contained code units. Output ONLY the code — no prose, no markdown fences, no explanations.\nLanguage: lua\nIndent: spaces, width 2"
+  local frozen = "You write complete, self-contained code units. Output ONLY the code that was asked for — no prose, no markdown fences, no explanations. Never repeat, echo, or rewrite existing file content: the output is inserted at the cursor, so emit only the new snippet.\nLanguage: lua\nIndent: spaces, width 2"
   local s0 = client.build_system_prompt(buf)
   assert(s0 == frozen,
     "system_prompt_untrusted_framing: no-opts output must equal the frozen Phase 3 string, got: " .. tostring(s0))

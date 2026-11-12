@@ -85,7 +85,7 @@ function M.build_system_prompt(buf, opts)
   if opts.mode == "continuation" then
     lead = "The user wrote a function header. Output ONLY the body, correctly indented. Never repeat the signature or header line."
   else
-    lead = "You write complete, self-contained code units. Output ONLY the code — no prose, no markdown fences, no explanations."
+    lead = "You write complete, self-contained code units. Output ONLY the code that was asked for — no prose, no markdown fences, no explanations. Never repeat, echo, or rewrite existing file content: the output is inserted at the cursor, so emit only the new snippet."
   end
   local s = string.format("%s\nLanguage: %s\nIndent: %s, width %d", lead, ft, indent, sw)
   if opts.has_digest then
